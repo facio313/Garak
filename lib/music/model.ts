@@ -1,3 +1,8 @@
+import { isKeySignature } from "./key-signatures";
+import type { KeySignature } from "./key-signatures";
+
+export type { KeyMode, KeySignature } from "./key-signatures";
+
 export type PitchStep = "C" | "D" | "E" | "F" | "G" | "A" | "B";
 export type Clef = "treble" | "bass" | "alto" | "tenor" | "percussion";
 export type DurationBase = 1 | 2 | 4 | 8 | 16;
@@ -85,7 +90,8 @@ export interface MeasureMeta {
   id: string;
   number: number;
   time: { numerator: number; denominator: number };
-  key: { fifths: number; mode: "major" | "minor" };
+  /** Concert key; a transposing part derives its own written key from its instrument snapshot. */
+  key: KeySignature;
 }
 
 export interface TieEdge {
@@ -169,9 +175,22 @@ export function validateScore(score: unknown, requireComplete = false): string[]
   if (!Array.isArray(candidate.parts) || !candidate.parts.length) errors.push("At least one instrument is required.");
   if (errors.length || !candidate.measureOrder || !candidate.parts || !candidate.measures) return errors;
 
+  for (const measureId of candidate.measureOrder) {
+    const measure = candidate.measures[measureId];
+    if (!measure) continue;
+    if (!isKeySignature(measure.key)) {
+      errors.push(`Measure ${measure.number} has an invalid key signature; fifths must be an integer from -7 to 7 and mode must be major or minor.`);
+    }
+  }
+
   for (const part of candidate.parts) {
     if (!part.instrument || !part.staves?.length) {
       errors.push(`${part.name || "Part"} has no playable staff.`);
+      continue;
+    }
+    const transposition = part.instrument.transposition;
+    if (!transposition || !Number.isInteger(transposition.diatonic) || !Number.isInteger(transposition.chromatic) || !Number.isInteger(transposition.octaveChange)) {
+      errors.push(`${part.name || "Part"} has an invalid transposition snapshot.`);
       continue;
     }
     for (const measureId of candidate.measureOrder) {

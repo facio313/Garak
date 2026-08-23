@@ -26,20 +26,40 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { INSTRUMENTS, SCORE_TEMPLATES } from "../lib/music/catalog";
 import { collectPlaybackNotes, scoreToMidi, scoreToMusicXML } from "../lib/music/exporters";
+import { KEY_SIGNATURES, keySignatureAlterForStep, keySignatureName, writtenKeyForPart } from "../lib/music/key-signatures";
+import type { KeySignature } from "../lib/music/key-signatures";
 import type { DurationBase, DurationValue, PitchStep, ScoreDocument } from "../lib/music/model";
 import { DURATION_LABELS, TICKS_PER_WHOLE, eventCount, getPrimaryVoice, pitchName, validateScore, voiceTicks } from "../lib/music/model";
-import { addInstrument, appendEvent, createScore, makeEvent, removeInstrument, removeLastEvent, toggleTieLastTwo, updatePart } from "../lib/music/score";
+import { addInstrument, appendEvent, appendMeasure, createScore, findEventTargetMeasureId, makeEvent, removeInstrument, removeLastEvent, removeLastMeasure, setScoreKey, toggleTieLastTwo, updatePart } from "../lib/music/score";
+import { DurationIcon } from "./DurationIcon";
 import { ScoreRenderer } from "./ScoreRenderer";
 
 const STORAGE_KEY = "garak.score.v1";
 const HISTORY_LIMIT = 100;
-const DURATION_CHOICES: Array<{ value: DurationBase; glyph: string; shortcut: string }> = [
-  { value: 1, glyph: "𝅝", shortcut: "1" },
-  { value: 2, glyph: "𝅗𝅥", shortcut: "2" },
-  { value: 4, glyph: "♩", shortcut: "3" },
-  { value: 8, glyph: "♪", shortcut: "4" },
-  { value: 16, glyph: "𝅘𝅥𝅯", shortcut: "5" },
+type AccidentalMode = "auto" | "sharp" | "flat" | "natural";
+
+const DURATION_CHOICES: Array<{ value: DurationBase; shortcut: string }> = [
+  { value: 1, shortcut: "1" },
+  { value: 2, shortcut: "2" },
+  { value: 4, shortcut: "3" },
+  { value: 8, shortcut: "4" },
+  { value: 16, shortcut: "5" },
 ];
+
+function keyValue(key: KeySignature): string {
+  return `${key.fifths}:${key.mode}`;
+}
+
+function inputAlter(mode: AccidentalMode, writtenKey: KeySignature, step: PitchStep): -1 | 0 | 1 {
+  if (mode === "auto") return keySignatureAlterForStep(writtenKey, step);
+  if (mode === "sharp") return 1;
+  if (mode === "flat") return -1;
+  return 0;
+}
+
+function accidentalGlyph(alter: -1 | 0 | 1): string {
+  return alter === 1 ? "♯" : alter === -1 ? "♭" : "♮";
+}
 
 function downloadBlob(data: BlobPart, type: string, filename: string) {
   const url = URL.createObjectURL(new Blob([data], { type }));
@@ -63,7 +83,7 @@ export function NotationStudio() {
   const [duration, setDuration] = useState<DurationBase>(4);
   const [dotted, setDotted] = useState(false);
   const [restMode, setRestMode] = useState(false);
-  const [alter, setAlter] = useState<-1 | 0 | 1>(0);
+  const [accidentalMode, setAccidentalMode] = useState<AccidentalMode>("auto");
   const [octave, setOctave] = useState(4);
   const [zoom, setZoom] = useState(82);
   const [status, setStatus] = useState("Opening your local score…");
@@ -84,6 +104,8 @@ export function NotationStudio() {
   const saveTimerRef = useRef<number | null>(null);
 
   const selectedPart = score.parts.find((part) => part.id === selectedPartId) ?? score.parts[0];
+  const initialConcertKey = score.measures[score.measureOrder[0]].key;
+  const selectedWrittenKey = selectedPart ? writtenKeyForPart(initialConcertKey, selectedPart) : initialConcertKey;
   const selectedEvents = selectedPart ? score.measureOrder.flatMap((measureId) => getPrimaryVoice(selectedPart, measureId).events) : [];
   const lastEvent = selectedEvents.at(-1);
   const totalEvents = eventCount(score);
@@ -214,11 +236,20 @@ export function NotationStudio() {
     if (!selectedPart) return;
     const eventId = `event-${Date.now()}-${eventSequence.current++}`;
     const durationValue: DurationValue = { base: duration, dots: dotted ? 1 : 0 };
-    const event = makeEvent({ id: eventId, pitch: { step, alter, octave }, duration: durationValue, rest: restMode || forceRest });
+    const targetMeasureId = findEventTargetMeasureId(score, selectedPart.id, durationValue) ?? score.measureOrder.at(-1)!;
+    const entryWrittenKey = writtenKeyForPart(score.measures[targetMeasureId].key, selectedPart);
+    const alter = inputAlter(accidentalMode, entryWrittenKey, step);
+    const event = makeEvent({
+      id: eventId,
+      pitch: { step, alter, octave },
+      duration: durationValue,
+      rest: restMode || forceRest,
+      accidentalDisplay: accidentalMode === "auto" ? "auto" : "force",
+    });
     const result = appendEvent(score, selectedPart.id, event);
     if (result.error) setStatus(result.error);
     else commit(result.score, `${event.kind === "rest" ? "Entered rest" : `Entered ${pitchName(event.notes[0].pitch)}`} · ${DURATION_LABELS[duration]}`);
-  }, [alter, commit, dotted, duration, octave, restMode, score, selectedPart]);
+  }, [accidentalMode, commit, dotted, duration, octave, restMode, score, selectedPart]);
 
   const toggleTie = useCallback(() => {
     if (!selectedPart) return;
@@ -365,6 +396,32 @@ export function NotationStudio() {
     commit(next, `Time signature set to ${value}`);
   };
 
+  const setKeySignature = (value: string) => {
+    const option = KEY_SIGNATURES.find((candidate) => keyValue(candidate) === value);
+    if (!option) {
+      setStatus("Choose a supported major or minor key signature.");
+      return;
+    }
+    const key: KeySignature = { fifths: option.fifths, mode: option.mode };
+    if (keyValue(initialConcertKey) === keyValue(key)) return;
+    commit(setScoreKey(score, key), `Concert key set to ${keySignatureName(key)}`);
+  };
+
+  const addEmptyMeasure = () => {
+    const next = appendMeasure(score);
+    const measure = next.measures[next.measureOrder.at(-1)!];
+    commit(next, `Added measure ${measure.number}`);
+  };
+
+  const removeEmptyMeasure = () => {
+    const result = removeLastMeasure(score);
+    if (!result.removed) {
+      setStatus(result.error);
+      return;
+    }
+    commit(result.score, `Removed empty measure ${result.measureNumber}`);
+  };
+
   return (
     <main className="studio-shell">
       <header className="app-header">
@@ -404,20 +461,27 @@ export function NotationStudio() {
         <div className="tool-group note-values">
           {DURATION_CHOICES.map((choice) => (
             <button className={`tool-button note-button ${duration === choice.value ? "active" : ""}`} key={choice.value} onClick={() => setDuration(choice.value)} aria-label={`${DURATION_LABELS[choice.value]} note, shortcut ${choice.shortcut}`}>
-              <span>{choice.glyph}</span><kbd>{choice.shortcut}</kbd>
+              <DurationIcon value={choice.value} /><kbd>{choice.shortcut}</kbd>
             </button>
           ))}
         </div>
+        <div className="tool-group" role="group" aria-label="Accidental input mode">
+          <button className={`mode-pill ${accidentalMode === "auto" ? "active" : ""}`} onClick={() => setAccidentalMode("auto")} aria-label="Automatic accidental from the selected part key signature" aria-pressed={accidentalMode === "auto"}>Auto</button>
+          <button className={`tool-button accidental ${accidentalMode === "sharp" ? "active" : ""}`} onClick={() => setAccidentalMode("sharp")} aria-label="Force sharp accidental" aria-pressed={accidentalMode === "sharp"}>♯</button>
+          <button className={`tool-button accidental ${accidentalMode === "flat" ? "active" : ""}`} onClick={() => setAccidentalMode("flat")} aria-label="Force flat accidental" aria-pressed={accidentalMode === "flat"}>♭</button>
+          <button className={`tool-button accidental ${accidentalMode === "natural" ? "active" : ""}`} onClick={() => setAccidentalMode("natural")} aria-label="Force natural accidental" aria-pressed={accidentalMode === "natural"}>♮</button>
+        </div>
         <div className="tool-group">
-          <button className={`tool-button accidental ${alter === 1 ? "active" : ""}`} onClick={() => setAlter(alter === 1 ? 0 : 1)} aria-label="Sharp">♯</button>
-          <button className={`tool-button accidental ${alter === -1 ? "active" : ""}`} onClick={() => setAlter(alter === -1 ? 0 : -1)} aria-label="Flat">♭</button>
-          <button className={`tool-button accidental ${alter === 0 ? "subtle-active" : ""}`} onClick={() => setAlter(0)} aria-label="Natural">♮</button>
           <button className={`tool-button dot-tool ${dotted ? "active" : ""}`} onClick={() => setDotted(!dotted)} aria-label="Dotted duration">·<kbd>.</kbd></button>
           <button className="tool-button tie-tool" onClick={toggleTie} aria-label="Tie the last two matching notes">⌒<kbd>T</kbd></button>
         </div>
         <div className="octave-control"><button onClick={() => setOctave(Math.max(0, octave - 1))} aria-label="Lower octave">−</button><span><small>OCTAVE</small>{octave}</span><button onClick={() => setOctave(Math.min(8, octave + 1))} aria-label="Raise octave">＋</button></div>
         <div className="pitch-keys" aria-label="Enter pitch">
-          {(["C", "D", "E", "F", "G", "A", "B"] as PitchStep[]).map((step) => <button key={step} onClick={() => enterEvent(step)}><span>{step}{alter === -1 ? "♭" : alter === 1 ? "♯" : ""}{octave}</span><kbd>{step}</kbd></button>)}
+          {(["C", "D", "E", "F", "G", "A", "B"] as PitchStep[]).map((step) => {
+            const previewAlter = inputAlter(accidentalMode, selectedWrittenKey, step);
+            const suffix = previewAlter === 0 && accidentalMode === "auto" ? "" : accidentalGlyph(previewAlter);
+            return <button key={step} onClick={() => enterEvent(step)} aria-label={`Enter ${step}${suffix}${octave}, ${accidentalMode} accidental mode`}><span>{step}{suffix}{octave}</span><kbd>{step}</kbd></button>;
+          })}
           <button className="rest-key" onClick={() => enterEvent("C", true)}><span>Rest</span><kbd>R</kbd></button>
         </div>
         <div className="toolbar-spacer" />
@@ -444,6 +508,10 @@ export function NotationStudio() {
         <section className="canvas-area" aria-label="Score canvas">
           <div className="canvas-controls">
             <span>{viewMode === "score" ? `${score.parts.length}-part score` : selectedPart?.name}</span><span className="separator">•</span><span>{score.measureOrder.length} measures</span><span className="separator">•</span><span>{totalEvents} events</span>
+            <span className="tool-section" role="group" aria-label="Measure controls">
+              <button className="mode-pill" onClick={addEmptyMeasure} aria-label="Add empty measure"><Plus size={11} aria-hidden="true" /> Measure</button>
+              <button className="mode-pill" onClick={removeEmptyMeasure} aria-label="Remove last empty measure"><Trash2 size={11} aria-hidden="true" /> Remove empty measure</button>
+            </span>
             <span className="canvas-hint"><kbd>A–G</kbd> pitch <kbd>R</kbd> rest <kbd>⌫</kbd> delete <kbd>Space</kbd> play</span>
           </div>
           <article className="score-page">
@@ -467,13 +535,19 @@ export function NotationStudio() {
             <label>Title<input id="score-title" value={metadataDraft.title} onChange={(event) => setMetadataDraft({ ...metadataDraft, title: event.target.value })} onBlur={applyMetadata} /></label>
             <label>Composer<input value={metadataDraft.composer} onChange={(event) => setMetadataDraft({ ...metadataDraft, composer: event.target.value })} onBlur={applyMetadata} /></label>
             <label>Tempo<span className="input-suffix"><input type="number" min="30" max="300" defaultValue={score.tempo} key={score.tempo} onBlur={(event) => setTempo(Number(event.target.value))} /><small>BPM</small></span></label>
-            <label>Meter<select value={`${score.measures[score.measureOrder[0]].time.numerator}/${score.measures[score.measureOrder[0]].time.denominator}`} onChange={(event) => setMeter(event.target.value)}><option value="4/4">4/4</option><option value="3/4">3/4</option><option value="6/8">6/8</option></select></label>
+            <label>Meter<select value={`${score.measures[score.measureOrder[0]].time.numerator}/${score.measures[score.measureOrder[0]].time.denominator}`} onChange={(event) => setMeter(event.target.value)}><option value="2/4">2/4</option><option value="3/4">3/4</option><option value="4/4">4/4</option><option value="5/8">5/8</option><option value="6/8">6/8</option><option value="7/8">7/8</option><option value="9/8">9/8</option><option value="12/8">12/8</option></select></label>
+            <label>Concert key<select aria-label="Concert key signature" value={keyValue(initialConcertKey)} onChange={(event) => setKeySignature(event.target.value)}>
+              {(["major", "minor"] as const).map((mode) => <optgroup key={mode} label={mode === "major" ? "Major keys" : "Minor keys"}>
+                {KEY_SIGNATURES.filter((key) => key.mode === mode).map((key) => <option data-key-signature-option key={keyValue(key)} value={keyValue(key)}>{key.label}</option>)}
+              </optgroup>)}
+            </select></label>
           </div>
           {selectedPart ? (
             <div className="inspector-section">
               <div className="section-title"><span>Part</span><span className="family-badge" style={{ color: selectedPart.instrument.color }}>{selectedPart.instrument.family}</span></div>
               <label>Instrument<output>{selectedPart.name}</output></label>
               <label>Clef<output>{selectedPart.staves[0].clef}</output></label>
+              <label>Written key<output aria-label={`${selectedPart.name} written key`}>{keySignatureName(selectedWrittenKey)}</output></label>
               <label>Written C sounds<output>{selectedPart.instrument.transposition.chromatic + selectedPart.instrument.transposition.octaveChange * 12 > 0 ? "+" : ""}{selectedPart.instrument.transposition.chromatic + selectedPart.instrument.transposition.octaveChange * 12} st</output></label>
               <div className="mixer-buttons"><button className={selectedPart.muted ? "active" : ""} onClick={() => commit(updatePart(score, selectedPart.id, { muted: !selectedPart.muted }), selectedPart.muted ? "Unmuted part" : "Muted part")}><Volume2 size={13} /> Mute</button><button className={selectedPart.solo ? "active" : ""} onClick={() => commit(updatePart(score, selectedPart.id, { solo: !selectedPart.solo }), selectedPart.solo ? "Unsoloed part" : "Soloed part")}>S Solo</button></div>
               <button className="danger-link" onClick={() => { const next = removeInstrument(score, selectedPart.id); setSelectedPartId(next.parts[0]?.id ?? ""); commit(next, `Removed ${selectedPart.name}`); }} disabled={score.parts.length <= 1}><Trash2 size={13} /> Remove part</button>

@@ -23,6 +23,17 @@ test("server-renders the Garak notation studio", async () => {
   assert.match(html, />Instruments</);
   assert.match(html, /\bExport\b/);
   assert.match(html, /Score canvas/);
+  assert.match(html, /aria-label="Concert key signature"/);
+  assert.equal((html.match(/data-key-signature-option/g) ?? []).length, 30);
+  assert.match(html, /Automatic accidental from the selected part key signature/);
+  assert.match(html, /Force sharp accidental/);
+  assert.match(html, />Written key</);
+  assert.match(html, /aria-label="Measure controls"/);
+  assert.match(html, /aria-label="Add empty measure"/);
+  assert.match(html, /aria-label="Remove last empty measure"/);
+  for (const meter of ["2/4", "3/4", "4/4", "5/8", "6/8", "7/8", "9/8", "12/8"]) {
+    assert.match(html, new RegExp(`value="${meter.replace("/", "\\/")}"`));
+  }
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Your site is taking shape/);
 });
 

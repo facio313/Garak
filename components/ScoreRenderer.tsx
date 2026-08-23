@@ -1,6 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { Beam as VexBeam, Stave as VexStave, StaveNote, Voice as VexVoice } from "vexflow";
+import { keySignaturesEqual, resolveMeasureAccidentals, timeSignaturesEqual } from "../lib/music/engraving";
+import { fifthsToVexFlowKey, writtenKeyForPart } from "../lib/music/key-signatures";
+import { getDefaultBeamGroups, getFullMeasureDuration } from "../lib/music/meter";
 import type { MusicEvent, PartData, ScoreDocument } from "../lib/music/model";
 import { getPrimaryVoice } from "../lib/music/model";
 
@@ -12,30 +16,103 @@ interface ScoreRendererProps {
   onSelectPart: (partId: string) => void;
 }
 
-const KEY_NAMES = ["Cb", "Gb", "Db", "Ab", "Eb", "Bb", "F", "C", "G", "D", "A", "E", "B", "F#", "C#"];
-const ROW_HEIGHT = 82;
-const SYSTEM_GAP = 34;
+interface SystemLayout {
+  measureIds: string[];
+  widths: number[];
+}
+
+const ROW_HEIGHT = 86;
+const SYSTEM_GAP = 42;
+const LABEL_WIDTH = 88;
+const RIGHT_MARGIN = 14;
 
 function vexKey(event: MusicEvent, clef: string): string[] {
-  if (event.kind === "rest") return [clef === "bass" ? "d/3" : clef === "alto" ? "c/4" : "b/4"];
-  return event.notes.map((note) => `${note.pitch.step.toLowerCase()}/${note.pitch.octave}`);
+  if (event.kind === "rest") return [clef === "bass" ? "d/3" : clef === "alto" || clef === "tenor" ? "c/4" : "b/4"];
+  return event.notes.map((note) => {
+    const accidental = note.pitch.alter === -2 ? "bb" : note.pitch.alter === -1 ? "b" : note.pitch.alter === 1 ? "#" : note.pitch.alter === 2 ? "##" : "";
+    return `${note.pitch.step.toLowerCase()}${accidental}/${note.pitch.octave}`;
+  });
+}
+
+function vexDuration(event: MusicEvent): string {
+  const base = event.duration.base === 1 ? "w" : event.duration.base === 2 ? "h" : event.duration.base === 4 ? "q" : String(event.duration.base);
+  return `${base}${"d".repeat(event.duration.dots)}${event.kind === "rest" ? "r" : ""}`;
+}
+
+function measureMusicWidth(parts: readonly PartData[], measureId: string): number {
+  const widths = parts.map((part) => {
+    const events = getPrimaryVoice(part, measureId).events;
+    let width = 92 + events.length * 18;
+    for (const event of events) {
+      if (event.duration.dots) width += 8;
+      if (event.kind === "note") {
+        width += Math.max(0, event.notes.length - 1) * 9;
+        width += event.notes.filter((note) => note.pitch.alter !== 0).length * 7;
+      }
+    }
+    return width;
+  });
+  return Math.max(96, Math.min(430, ...widths));
+}
+
+function modifierWidth(score: ScoreDocument, parts: readonly PartData[], measureId: string, systemStart: boolean): number {
+  const absoluteIndex = score.measureOrder.indexOf(measureId);
+  const measure = score.measures[measureId];
+  const previous = absoluteIndex > 0 ? score.measures[score.measureOrder[absoluteIndex - 1]] : null;
+  const maxFifths = Math.max(0, ...parts.filter((part) => part.staves[0].clef !== "percussion").map((part) => Math.abs(writtenKeyForPart(measure.key, part).fifths)));
+  const keyChanged = previous && parts.some((part) => !keySignaturesEqual(writtenKeyForPart(previous.key, part), writtenKeyForPart(measure.key, part)));
+  const timeChanged = !previous || !timeSignaturesEqual(previous.time, measure.time);
+  let width = 0;
+  if (systemStart) width += 54 + maxFifths * 8;
+  else if (keyChanged) width += 26 + maxFifths * 8;
+  if (timeChanged) width += 38;
+  return width;
+}
+
+function buildSystems(score: ScoreDocument, parts: readonly PartData[], renderWidth: number): SystemLayout[] {
+  const usableWidth = Math.max(360, renderWidth - LABEL_WIDTH - RIGHT_MARGIN);
+  const systems: Array<{ measureIds: string[]; minimums: number[] }> = [];
+  let current: { measureIds: string[]; minimums: number[] } = { measureIds: [], minimums: [] };
+
+  for (const measureId of score.measureOrder) {
+    let minimum = measureMusicWidth(parts, measureId) + modifierWidth(score, parts, measureId, current.measureIds.length === 0);
+    const used = current.minimums.reduce((sum, value) => sum + value, 0);
+    if (current.measureIds.length && used + minimum > usableWidth) {
+      systems.push(current);
+      current = { measureIds: [], minimums: [] };
+      minimum = measureMusicWidth(parts, measureId) + modifierWidth(score, parts, measureId, true);
+    }
+    current.measureIds.push(measureId);
+    current.minimums.push(Math.max(96, minimum));
+  }
+  if (current.measureIds.length) systems.push(current);
+
+  return systems.map((system, index) => {
+    const minimumTotal = system.minimums.reduce((sum, value) => sum + value, 0);
+    const availableExtra = Math.max(0, usableWidth - minimumTotal);
+    const isLast = index === systems.length - 1;
+    const distributedExtra = isLast ? Math.min(availableExtra, system.measureIds.length * 76) : availableExtra;
+    const widths = system.minimums.map((minimum) => minimum + distributedExtra * (minimum / minimumTotal));
+    return { measureIds: system.measureIds, widths };
+  });
 }
 
 export function ScoreRenderer({ score, selectedPartId, viewMode, zoom, onSelectPart }: ScoreRendererProps) {
+  const frameRef = useRef<HTMLDivElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
-  const [width, setWidth] = useState(820);
+  const [physicalWidth, setPhysicalWidth] = useState(640);
   const [renderError, setRenderError] = useState("");
   const parts = useMemo(() => viewMode === "part" ? score.parts.filter((part) => part.id === selectedPartId) : score.parts, [score.parts, selectedPartId, viewMode]);
-  const systems = useMemo(() => {
-    const result: string[][] = [];
-    for (let index = 0; index < score.measureOrder.length; index += 4) result.push(score.measureOrder.slice(index, index + 4));
-    return result;
-  }, [score.measureOrder]);
+  const scale = Math.max(.55, Math.min(1.5, zoom / 100));
+  const renderWidth = Math.max(640, Math.floor(physicalWidth / scale));
+  const systems = useMemo(() => buildSystems(score, parts, renderWidth), [parts, renderWidth, score]);
+  const systemHeight = parts.length * ROW_HEIGHT + SYSTEM_GAP;
+  const renderHeight = Math.max(230, systems.length * systemHeight + 22);
 
   useEffect(() => {
-    if (!hostRef.current) return;
-    const observer = new ResizeObserver(([entry]) => setWidth(Math.max(640, Math.floor(entry.contentRect.width))));
-    observer.observe(hostRef.current);
+    if (!frameRef.current) return;
+    const observer = new ResizeObserver(([entry]) => setPhysicalWidth(Math.max(320, Math.floor(entry.contentRect.width))));
+    observer.observe(frameRef.current);
     return () => observer.disconnect();
   }, []);
 
@@ -43,66 +120,151 @@ export function ScoreRenderer({ score, selectedPartId, viewMode, zoom, onSelectP
     let disposed = false;
     async function draw() {
       const host = hostRef.current;
-      if (!host) return;
+      if (!host || !parts.length) return;
       host.replaceChildren();
       try {
-        const { Accidental, Dot, Formatter, Renderer, Stave, StaveNote, StaveTie, Voice } = await import("vexflow");
+        const { Accidental, Beam, Dot, Formatter, Fraction, Renderer, Stave, StaveConnector, StaveNote, StaveTie, Voice, default: VexFlow } = await import("vexflow");
         if (disposed || !hostRef.current) return;
-        const renderWidth = Math.max(640, width);
-        const systemHeight = parts.length * ROW_HEIGHT + SYSTEM_GAP;
-        const renderHeight = Math.max(230, systems.length * systemHeight + 20);
         const renderer = new Renderer(host, Renderer.Backends.SVG);
         renderer.resize(renderWidth, renderHeight);
         const context = renderer.getContext();
-        context.setFillStyle("#272722");
-        context.setStrokeStyle("#34342f");
-        const labelWidth = 86;
-        const usableWidth = renderWidth - labelWidth - 20;
-        const measureWidth = usableWidth / 4;
-        const noteRefs = new Map<string, { note: InstanceType<typeof StaveNote>; index: number }>();
+        context.setFillStyle("#25251f");
+        context.setStrokeStyle("#30302a");
+        const noteRefs = new Map<string, { note: StaveNote; index: number; systemIndex: number }>();
+        const tiedDestinations = new Set(score.ties.map((tie) => tie.toNoteId));
+        const absoluteIndex = new Map(score.measureOrder.map((measureId, index) => [measureId, index]));
 
-        systems.forEach((measureIds, systemIndex) => parts.forEach((part: PartData, partIndex: number) => {
-          const y = 18 + systemIndex * systemHeight + partIndex * ROW_HEIGHT;
-          context.save();
-          context.setFont("11px Georgia");
-          context.fillText(part.shortName, 8, y + 38);
-          context.restore();
-          measureIds.forEach((measureId, measureIndex) => {
-            const measure = score.measures[measureId];
-            const x = labelWidth + measureIndex * measureWidth;
-            const stave = new Stave(x, y, measureWidth + .5);
-            if (measureIndex === 0) {
-              if (part.staves[0].clef !== "percussion") stave.addClef(part.staves[0].clef);
-              else stave.addClef("percussion");
-              const keyName = KEY_NAMES[Math.max(0, Math.min(14, measure.key.fifths + 7))];
-              if (keyName && part.staves[0].clef !== "percussion") stave.addKeySignature(keyName);
-              stave.addTimeSignature(`${measure.time.numerator}/${measure.time.denominator}`);
-            }
-            stave.setContext(context).draw();
-            const voiceData = getPrimaryVoice(part, measureId);
-            const sourceEvents: MusicEvent[] = voiceData.events.length ? voiceData.events : [{ id: `placeholder-${part.id}-${measureId}`, kind: "rest", duration: { base: 1, dots: 0 } }];
-            const notes = sourceEvents.map((event) => {
-              const duration = `${event.duration.base === 1 ? "w" : event.duration.base === 2 ? "h" : event.duration.base === 4 ? "q" : event.duration.base}${event.kind === "rest" ? "r" : ""}`;
-              const note = new StaveNote({ keys: vexKey(event, part.staves[0].clef), duration, clef: part.staves[0].clef, autoStem: true });
-              if (event.kind === "note") {
-                event.notes.forEach((scoreNote, noteIndex) => {
-                  const accidental = scoreNote.pitch.alter === -2 ? "bb" : scoreNote.pitch.alter === -1 ? "b" : scoreNote.pitch.alter === 1 ? "#" : scoreNote.pitch.alter === 2 ? "##" : null;
-                  if (accidental && scoreNote.accidentalDisplay !== "hide") note.addModifier(new Accidental(accidental), noteIndex);
-                  noteRefs.set(scoreNote.id, { note, index: noteIndex });
-                });
-              }
-              if (event.duration.dots) Dot.buildAndAttach([note], { all: true });
-              return note;
-            });
-            const voice = new Voice({ numBeats: measure.time.numerator, beatValue: measure.time.denominator }).setMode(Voice.Mode.SOFT).addTickables(notes);
-            new Formatter().joinVoices([voice]).formatToStave([voice], stave);
-            voice.draw(context, stave);
+        systems.forEach((system, systemIndex) => {
+          const yBase = 18 + systemIndex * systemHeight;
+          const stavesByMeasure: VexStave[][] = system.measureIds.map(() => []);
+          const xPositions: number[] = [];
+          let runningX = LABEL_WIDTH;
+          system.widths.forEach((measureWidth) => {
+            xPositions.push(runningX);
+            runningX += measureWidth;
           });
-        }));
+
+          parts.forEach((part, partIndex) => {
+            const y = yBase + partIndex * ROW_HEIGHT;
+            context.save();
+            context.setFont(systemIndex === 0 ? "11px Arial" : "10px Arial");
+            context.fillText(part.shortName, 8, y + 38);
+            context.restore();
+
+            system.measureIds.forEach((measureId, measureIndex) => {
+              const index = absoluteIndex.get(measureId) ?? 0;
+              const measure = score.measures[measureId];
+              const previous = index > 0 ? score.measures[score.measureOrder[index - 1]] : null;
+              const stave = new Stave(xPositions[measureIndex], y, system.widths[measureIndex] + .5);
+              const atSystemStart = measureIndex === 0;
+              if (atSystemStart) stave.addClef(part.staves[0].clef);
+              if (part.staves[0].clef !== "percussion") {
+                const writtenKey = writtenKeyForPart(measure.key, part);
+                const previousWrittenKey = previous ? writtenKeyForPart(previous.key, part) : null;
+                const keyChanged = previousWrittenKey && !keySignaturesEqual(previousWrittenKey, writtenKey);
+                if (atSystemStart || keyChanged) {
+                  stave.addKeySignature(
+                    fifthsToVexFlowKey(writtenKey.fifths),
+                    keyChanged && !atSystemStart ? fifthsToVexFlowKey(previousWrittenKey.fifths) : undefined,
+                  );
+                }
+              }
+              if (!previous || !timeSignaturesEqual(previous.time, measure.time)) {
+                stave.addTimeSignature(`${measure.time.numerator}/${measure.time.denominator}`);
+              }
+              stavesByMeasure[measureIndex].push(stave);
+            });
+          });
+
+          stavesByMeasure.forEach((staves) => Stave.formatBegModifiers(staves));
+          stavesByMeasure.flat().forEach((stave) => stave.setContext(context).draw());
+
+          if (parts.length > 1) {
+            const firstColumn = stavesByMeasure[0];
+            new StaveConnector(firstColumn[0], firstColumn[firstColumn.length - 1]).setType("singleLeft").setContext(context).draw();
+            let familyStart = 0;
+            for (let partIndex = 1; partIndex <= parts.length; partIndex += 1) {
+              const familyEnded = partIndex === parts.length || parts[partIndex].instrument.family !== parts[familyStart].instrument.family;
+              if (!familyEnded) continue;
+              if (partIndex - familyStart > 1) {
+                new StaveConnector(firstColumn[familyStart], firstColumn[partIndex - 1]).setType("bracket").setContext(context).draw();
+              }
+              familyStart = partIndex;
+            }
+            const lastColumn = stavesByMeasure[stavesByMeasure.length - 1];
+            new StaveConnector(lastColumn[0], lastColumn[lastColumn.length - 1]).setType("singleRight").setContext(context).draw();
+          }
+
+          context.save();
+          context.setFont("9px Arial");
+          context.setFillStyle("#777168");
+          system.measureIds.forEach((measureId, measureIndex) => context.fillText(String(score.measures[measureId].number), xPositions[measureIndex] + 4, yBase - 4));
+          context.restore();
+
+          system.measureIds.forEach((measureId, measureIndex) => {
+            const measure = score.measures[measureId];
+            const cells: Array<{ voice: VexVoice; notes: StaveNote[]; beams: VexBeam[]; stave: VexStave }> = [];
+
+            parts.forEach((part, partIndex) => {
+              const stave = stavesByMeasure[measureIndex][partIndex];
+              const voiceData = getPrimaryVoice(part, measureId);
+              const isEmptyMeasure = voiceData.events.length === 0;
+              const sourceEvents: MusicEvent[] = isEmptyMeasure ? [{ id: `placeholder-${part.id}-${measureId}`, kind: "rest", duration: { base: 1, dots: 0 } }] : voiceData.events;
+              const writtenKey = writtenKeyForPart(measure.key, part);
+              const accidentals = resolveMeasureAccidentals(sourceEvents, writtenKey, tiedDestinations);
+              const notes = sourceEvents.map((event) => {
+                const fullMeasure = getFullMeasureDuration(measure.time);
+                const note = new StaveNote({
+                  keys: vexKey(event, part.staves[0].clef),
+                  duration: vexDuration(event),
+                  clef: part.staves[0].clef,
+                  autoStem: true,
+                  alignCenter: isEmptyMeasure,
+                  durationOverride: isEmptyMeasure ? new Fraction(fullMeasure.numerator * VexFlow.RESOLUTION, fullMeasure.denominator) : undefined,
+                });
+                if (event.kind === "note") {
+                  event.notes.forEach((scoreNote, noteIndex) => {
+                    const accidental = accidentals.get(scoreNote.id);
+                    if (accidental) note.addModifier(new Accidental(accidental), noteIndex);
+                    noteRefs.set(scoreNote.id, { note, index: noteIndex, systemIndex });
+                  });
+                }
+                if (event.duration.dots) Dot.buildAndAttach([note], { all: true });
+                note.setStave(stave);
+                return note;
+              });
+              const voice = new Voice({ numBeats: measure.time.numerator, beatValue: measure.time.denominator })
+                .setMode(Voice.Mode.SOFT)
+                .setStave(stave)
+                .addTickables(notes);
+              const beams = Beam.generateBeams(notes, {
+                groups: getDefaultBeamGroups(measure.time).map((group) => new Fraction(group.numerator, group.denominator)),
+              });
+              cells.push({ voice, notes, beams, stave });
+            });
+
+            const noteStartX = Math.max(...cells.map((cell) => cell.stave.getNoteStartX()));
+            cells.forEach((cell) => cell.stave.setNoteStartX(noteStartX));
+            const justifyWidth = Math.max(24, cells[0].stave.getNoteEndX() - noteStartX);
+            const voices = cells.map((cell) => cell.voice);
+            new Formatter().joinVoices(voices).format(voices, justifyWidth, { context });
+            cells.forEach((cell) => {
+              cell.voice.draw(context, cell.stave);
+              cell.beams.forEach((beam) => beam.setContext(context).draw());
+            });
+          });
+        });
+
         score.ties.forEach((tie) => {
           const first = noteRefs.get(tie.fromNoteId);
           const last = noteRefs.get(tie.toNoteId);
-          if (first && last) new StaveTie({ firstNote: first.note, lastNote: last.note, firstIndexes: [first.index], lastIndexes: [last.index] }).setContext(context).draw();
+          if (!first || !last) return;
+          if (first.systemIndex === last.systemIndex) {
+            new StaveTie({ firstNote: first.note, lastNote: last.note, firstIndexes: [first.index], lastIndexes: [last.index] }).setContext(context).draw();
+          } else {
+            new StaveTie({ firstNote: first.note, lastNote: null, firstIndexes: [first.index], lastIndexes: [first.index] }).setContext(context).draw();
+            new StaveTie({ firstNote: null, lastNote: last.note, firstIndexes: [last.index], lastIndexes: [last.index] }).setContext(context).draw();
+          }
         });
         setRenderError("");
       } catch (error) {
@@ -111,13 +273,12 @@ export function ScoreRenderer({ score, selectedPartId, viewMode, zoom, onSelectP
     }
     void draw();
     return () => { disposed = true; };
-  }, [parts, score, systems, width]);
+  }, [parts, renderHeight, renderWidth, score, systemHeight, systems]);
 
   const handleClick = (event: React.MouseEvent<HTMLElement>) => {
     if (!parts.length) return;
     const rect = event.currentTarget.getBoundingClientRect();
-    const localY = event.clientY - rect.top;
-    const systemHeight = parts.length * ROW_HEIGHT + SYSTEM_GAP;
+    const localY = (event.clientY - rect.top) / scale;
     const withinSystem = Math.max(0, (localY - 18) % systemHeight);
     const index = Math.max(0, Math.min(parts.length - 1, Math.floor(withinSystem / ROW_HEIGHT)));
     onSelectPart(parts[index].id);
@@ -126,10 +287,12 @@ export function ScoreRenderer({ score, selectedPartId, viewMode, zoom, onSelectP
   const selectedIndex = parts.findIndex((part) => part.id === selectedPartId);
 
   return (
-    <div className="engraving-frame" style={{ width: `${zoom}%` }}>
-      {selectedIndex >= 0 && viewMode === "score" ? systems.map((_, systemIndex) => <div className="staff-selection" key={systemIndex} style={{ top: 18 + systemIndex * (parts.length * ROW_HEIGHT + SYSTEM_GAP) + selectedIndex * ROW_HEIGHT, height: ROW_HEIGHT }} />) : null}
-      <div ref={hostRef} className="vexflow-host" aria-hidden="true" />
-      <button type="button" className="score-hit-target" onClick={handleClick} aria-label="Score. Select a staff, then use A through G to enter notes." />
+    <div ref={frameRef} className="engraving-frame" style={{ height: `${renderHeight * scale}px` }}>
+      <div className="engraving-surface" style={{ width: `${renderWidth}px`, height: `${renderHeight}px`, transform: `scale(${scale})` }}>
+        {selectedIndex >= 0 && viewMode === "score" ? systems.map((_, systemIndex) => <div className="staff-selection" key={systemIndex} style={{ top: 18 + systemIndex * systemHeight + selectedIndex * ROW_HEIGHT, height: ROW_HEIGHT }} />) : null}
+        <div ref={hostRef} className="vexflow-host" aria-hidden="true" />
+        <button type="button" className="score-hit-target" onClick={handleClick} aria-label="Score. Select a staff, then use A through G to enter notes." />
+      </div>
       {renderError ? <div className="engraving-error" role="alert">{renderError}</div> : null}
     </div>
   );

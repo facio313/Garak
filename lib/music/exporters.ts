@@ -1,4 +1,5 @@
 import type { Clef, MusicEvent, ScoreDocument } from "./model";
+import { writtenKeyForPart } from "./key-signatures";
 import { durationTicks, getPrimaryVoice, measureCapacity, validateScore, writtenToSounding } from "./model";
 
 const XML_TYPES = { 1: "whole", 2: "half", 4: "quarter", 8: "eighth", 16: "16th" } as const;
@@ -19,31 +20,37 @@ export function scoreToMusicXML(score: ScoreDocument): string {
   if (errors.length) throw new Error(errors[0]);
   const tiedFrom = new Set(score.ties.map((tie) => tie.fromNoteId));
   const tiedTo = new Set(score.ties.map((tie) => tie.toNoteId));
-  const partList = score.parts.map((part) => `
+  const partList = score.parts.map((part, partIndex) => `
     <score-part id="${xml(part.id)}">
       <part-name>${xml(part.name)}</part-name>
       <part-abbreviation>${xml(part.shortName)}</part-abbreviation>
       <score-instrument id="${xml(part.id)}-i1"><instrument-name>${xml(part.instrument.name)}</instrument-name></score-instrument>
-      <midi-instrument id="${xml(part.id)}-i1"><midi-channel>1</midi-channel><midi-program>${part.instrument.midiProgram + 1}</midi-program></midi-instrument>
+      <midi-instrument id="${xml(part.id)}-i1"><midi-channel>${midiChannelForPart(partIndex, part.instrument.family) + 1}</midi-channel><midi-program>${part.instrument.midiProgram + 1}</midi-program></midi-instrument>
     </score-part>`).join("");
 
   const parts = score.parts.map((part) => {
     const clef = CLEFS[part.staves[0].clef];
     const measures = score.measureOrder.map((measureId, measureIndex) => {
       const measure = score.measures[measureId];
+      const previousMeasure = measureIndex ? score.measures[score.measureOrder[measureIndex - 1]] : null;
+      const writtenKey = writtenKeyForPart(measure.key, part);
+      const previousWrittenKey = previousMeasure ? writtenKeyForPart(previousMeasure.key, part) : null;
+      const keyChanged = !previousWrittenKey || previousWrittenKey.fifths !== writtenKey.fifths || previousWrittenKey.mode !== writtenKey.mode;
+      const timeChanged = !previousMeasure || previousMeasure.time.numerator !== measure.time.numerator || previousMeasure.time.denominator !== measure.time.denominator;
       const voice = getPrimaryVoice(part, measureId);
-      const attributes = measureIndex === 0 ? `
+      const attributes = measureIndex === 0 || keyChanged || timeChanged ? `
         <attributes>
-          <divisions>960</divisions>
-          <key><fifths>${measure.key.fifths}</fifths><mode>${measure.key.mode}</mode></key>
-          <time><beats>${measure.time.numerator}</beats><beat-type>${measure.time.denominator}</beat-type></time>
-          <clef><sign>${clef.sign}</sign><line>${clef.line}</line></clef>
-          <transpose><diatonic>${part.instrument.transposition.diatonic}</diatonic><chromatic>${part.instrument.transposition.chromatic}</chromatic><octave-change>${part.instrument.transposition.octaveChange}</octave-change></transpose>
+          ${measureIndex === 0 ? "<divisions>960</divisions>" : ""}
+          ${keyChanged ? `<key><fifths>${writtenKey.fifths}</fifths><mode>${writtenKey.mode}</mode></key>` : ""}
+          ${timeChanged ? `<time><beats>${measure.time.numerator}</beats><beat-type>${measure.time.denominator}</beat-type></time>` : ""}
+          ${measureIndex === 0 ? `<clef><sign>${clef.sign}</sign><line>${clef.line}</line></clef>` : ""}
+          ${measureIndex === 0 ? `<transpose><diatonic>${part.instrument.transposition.diatonic}</diatonic><chromatic>${part.instrument.transposition.chromatic}</chromatic><octave-change>${part.instrument.transposition.octaveChange}</octave-change></transpose>` : ""}
         </attributes>` : "";
-      const notes = voice.events.map((event) => eventToXML(event, tiedFrom, tiedTo)).join("");
-      const implicit = voice.events.reduce((sum, event) => sum + durationTicks(event.duration), 0) < measureCapacity(measure) ? ' implicit="yes"' : "";
+      const notes = voice.events.length
+        ? voice.events.map((event) => eventToXML(event, tiedFrom, tiedTo)).join("")
+        : fullMeasureRestToXML(measureCapacity(measure));
       return `
-      <measure number="${measure.number}"${implicit}>${attributes}${notes}
+      <measure number="${measure.number}">${attributes}${notes}
       </measure>`;
     }).join("");
     return `
@@ -61,6 +68,11 @@ export function scoreToMusicXML(score: ScoreDocument): string {
 </score-partwise>`;
 }
 
+function fullMeasureRestToXML(duration: number): string {
+  return `
+        <note><rest measure="yes"/><duration>${duration}</duration><voice>1</voice></note>`;
+}
+
 function eventToXML(event: MusicEvent, tiedFrom: Set<string>, tiedTo: Set<string>): string {
   const type = XML_TYPES[event.duration.base];
   const duration = durationTicks(event.duration);
@@ -71,7 +83,7 @@ function eventToXML(event: MusicEvent, tiedFrom: Set<string>, tiedTo: Set<string
     const tieStop = tiedTo.has(note.id);
     const accidental = note.pitch.alter === -2 ? "flat-flat" : note.pitch.alter === -1 ? "flat" : note.pitch.alter === 1 ? "sharp" : note.pitch.alter === 2 ? "double-sharp" : "natural";
     return `
-        <note>${noteIndex ? "<chord/>" : ""}<pitch><step>${note.pitch.step}</step>${note.pitch.alter ? `<alter>${note.pitch.alter}</alter>` : ""}<octave>${note.pitch.octave}</octave></pitch><duration>${duration}</duration><voice>1</voice><type>${type}</type>${event.duration.dots ? "<dot/>" : ""}${note.accidentalDisplay === "force" ? `<accidental>${accidental}</accidental>` : ""}${tieStop ? '<tie type="stop"/>' : ""}${tieStart ? '<tie type="start"/>' : ""}${tieStart || tieStop ? `<notations>${tieStop ? '<tied type="stop"/>' : ""}${tieStart ? '<tied type="start"/>' : ""}</notations>` : ""}</note>`;
+        <note>${noteIndex ? "<chord/>" : ""}<pitch><step>${note.pitch.step}</step>${note.pitch.alter ? `<alter>${note.pitch.alter}</alter>` : ""}<octave>${note.pitch.octave}</octave></pitch><duration>${duration}</duration>${tieStop ? '<tie type="stop"/>' : ""}${tieStart ? '<tie type="start"/>' : ""}<voice>1</voice><type>${type}</type>${event.duration.dots ? "<dot/>" : ""}${note.accidentalDisplay === "force" ? `<accidental>${accidental}</accidental>` : ""}${tieStart || tieStop ? `<notations>${tieStop ? '<tied type="stop"/>' : ""}${tieStart ? '<tied type="start"/>' : ""}</notations>` : ""}</note>`;
   }).join("");
 }
 
@@ -103,6 +115,12 @@ interface TimedNote {
   midi: number;
   startTicks: number;
   durationTicks: number;
+}
+
+function midiChannelForPart(partIndex: number, family: string): number {
+  if (family === "Percussion") return 9;
+  const melodicChannel = partIndex % 15;
+  return melodicChannel >= 9 ? melodicChannel + 1 : melodicChannel;
 }
 
 function collectTimedNotes(score: ScoreDocument): TimedNote[] {
@@ -173,8 +191,7 @@ export function scoreToMidi(score: ScoreDocument): Uint8Array {
 
   const timedNotes = collectTimedNotes(score);
   score.parts.forEach((part, partIndex) => {
-    const melodicChannel = partIndex % 15 >= 9 ? (partIndex % 15) + 1 : partIndex % 15;
-    const channel = part.instrument.family === "Percussion" ? 9 : melodicChannel;
+    const channel = midiChannelForPart(partIndex, part.instrument.family);
     const events: MidiEvent[] = [
       { tick: 0, order: 0, bytes: [0xff, 0x03, textBytes(part.name).length, ...textBytes(part.name)] },
       { tick: 0, order: 1, bytes: [0xc0 | channel, Math.max(0, Math.min(127, part.instrument.midiProgram))] },
