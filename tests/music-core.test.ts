@@ -7,7 +7,7 @@ import { KEY_SIGNATURES, concertToWrittenKey, createWrittenKeySignatureSnapshot,
 import { getDefaultBeamGroups, getFullMeasureDuration } from "../lib/music/meter";
 import { TICKS_PER_QUARTER, durationTicks, eventCount, getPrimaryVoice, measureCapacity, validateScore, voiceTicks, writtenToSounding } from "../lib/music/model";
 import type { MusicEvent, Pitch, ScoreDocument } from "../lib/music/model";
-import { addInstrument, appendEvent, appendMeasure, createScore, findEventTargetMeasureId, makeEvent, removeLastMeasure, setMeasureKey, setScoreKey, toggleTieLastTwo } from "../lib/music/score";
+import { addInstrument, appendEvent, appendMeasure, createScore, findEventTargetMeasureId, makeEvent, removeLastEvent, removeLastMeasure, setMeasureKey, setScoreKey, toggleTieLastTwo } from "../lib/music/score";
 
 test("duration and meter arithmetic stays exact", () => {
   assert.equal(durationTicks({ base: 1, dots: 0 }), TICKS_PER_QUARTER * 4);
@@ -215,6 +215,7 @@ test("MusicXML part-list assigns melodic channels without using percussion chann
 
 test("MusicXML exports empty measures as complete rests with the active meter duration", () => {
   const score = createScore("solo", { seedDemo: false });
+  score.parts[0].staves = [score.parts[0].staves[0]];
   score.measures[score.measureOrder[0]].time = { numerator: 6, denominator: 8 };
   score.measures[score.measureOrder[1]].time = { numerator: 5, denominator: 8 };
   const musicXml = scoreToMusicXML(score);
@@ -227,10 +228,12 @@ test("MusicXML exports empty measures as complete rests with the active meter du
   assert.match(firstMeasure, /<note><rest measure="yes"\/><duration>2880<\/duration><voice>1<\/voice><\/note>/);
   assert.match(secondMeasure, /<note><rest measure="yes"\/><duration>2400<\/duration><voice>1<\/voice><\/note>/);
   assert.doesNotMatch(firstMeasure, /<rest measure="yes"\/>[\s\S]*?<type>/);
+  assert.doesNotMatch(pianoPart, /<staves>|<staff>|<clef number=/);
 });
 
 test("MusicXML note data keeps pitch, dot, accidental display, and tie ordering consistent", () => {
   const score = createScore("solo", { seedDemo: false });
+  score.parts[0].staves = [score.parts[0].staves[0]];
   const voice = getPrimaryVoice(score.parts[0], score.measureOrder[0]);
   voice.events = [
     makeEvent({ id: "auto-sharp", pitch: { step: "F", alter: 1, octave: 4 }, duration: { base: 8, dots: 1 }, rest: false }),
@@ -280,6 +283,71 @@ test("MusicXML emits key mode and time changes only at their measure boundaries"
   assert.doesNotMatch(measures[3], /<attributes>/);
 });
 
+test("multi-staff export preserves both primary voices, empty staves, ties, playback, and MIDI", () => {
+  const score = createScore("solo", { seedDemo: false });
+  const part = score.parts[0];
+  part.staves = [part.staves[0]];
+  part.staves.push({
+    id: `${part.id}-staff-2`,
+    clef: "bass",
+    measures: Object.fromEntries(score.measureOrder.map((measureId) => [measureId, {
+      voices: [{ id: `${part.id}-${measureId}-staff-2-v1`, events: [] }],
+    }])),
+  });
+
+  const [firstMeasureId, secondMeasureId] = score.measureOrder;
+  const tieFrom = makeEvent({
+    id: "upper-tie-from",
+    pitch: { step: "C", alter: 0, octave: 5 },
+    duration: { base: 1, dots: 0 },
+    rest: false,
+  });
+  const tieTo = makeEvent({
+    id: "upper-tie-to",
+    pitch: { step: "C", alter: 0, octave: 5 },
+    duration: { base: 1, dots: 0 },
+    rest: false,
+  });
+  const lowerNote = makeEvent({
+    id: "lower-whole-note",
+    pitch: { step: "C", alter: 0, octave: 3 },
+    duration: { base: 1, dots: 0 },
+    rest: false,
+  });
+  if (tieFrom.kind !== "note" || tieTo.kind !== "note") assert.fail("Expected note events for the staff tie fixture.");
+
+  part.staves[0].measures[firstMeasureId].voices[0].events = [tieFrom];
+  part.staves[0].measures[secondMeasureId].voices[0].events = [tieTo];
+  part.staves[1].measures[firstMeasureId].voices[0].events = [lowerNote];
+  score.ties = [{ id: "upper-staff-tie", fromNoteId: tieFrom.notes[0].id, toNoteId: tieTo.notes[0].id }];
+
+  const musicXml = scoreToMusicXML(score);
+  const pianoPart = musicXml.match(/<part id="part-1-piano">([\s\S]*?)<\/part>/)?.[1] ?? "";
+  const measures = [...pianoPart.matchAll(/<measure number="\d+"[^>]*>([\s\S]*?)<\/measure>/g)].map((match) => match[0]);
+
+  assert.equal(measures.length, score.measureOrder.length);
+  assert.match(measures[0], /<staves>2<\/staves>/);
+  assert.match(measures[0], /<clef number="1"><sign>G<\/sign><line>2<\/line><\/clef>/);
+  assert.match(measures[0], /<clef number="2"><sign>F<\/sign><line>4<\/line><\/clef>/);
+  assert.match(measures[0], /<step>C<\/step><octave>5<\/octave>[\s\S]*?<tie type="start"\/><voice>1<\/voice><type>whole<\/type><staff>1<\/staff><notations><tied type="start"\/><\/notations>/);
+  assert.match(measures[0], /<backup><duration>3840<\/duration><\/backup>[\s\S]*?<step>C<\/step><octave>3<\/octave>[\s\S]*?<voice>2<\/voice><type>whole<\/type><staff>2<\/staff>/);
+  assert.match(measures[1], /<tie type="stop"\/><voice>1<\/voice><type>whole<\/type><staff>1<\/staff><notations><tied type="stop"\/><\/notations>/);
+  assert.match(measures[1], /<backup><duration>3840<\/duration><\/backup>[\s\S]*?<note><rest measure="yes"\/><duration>3840<\/duration><voice>2<\/voice><staff>2<\/staff><\/note>/);
+  assert.deepEqual(
+    [...pianoPart.matchAll(/<backup><duration>(\d+)<\/duration><\/backup>/g)].map((match) => Number(match[1])),
+    [3840, 3840, 3840, 3840],
+  );
+
+  const playback = collectPlaybackNotes(score).sort((first, second) => first.midi - second.midi);
+  assert.deepEqual(playback.map((note) => note.midi), [48, 72]);
+  assert.ok(playback.find((note) => note.midi === 72)!.durationSeconds > playback.find((note) => note.midi === 48)!.durationSeconds);
+
+  const midi = scoreToMidi(score);
+  const includesNoteOn = (pitch: number) => [...midi].some((byte, index) => byte === 0x90 && midi[index + 1] === pitch && midi[index + 2] === 82);
+  assert.equal(includesNoteOn(48), true);
+  assert.equal(includesNoteOn(72), true);
+});
+
 test("templates share one score schema and preserve instrument snapshots", () => {
   const expected = new Map([["solo", 1], ["quartet", 4], ["chamber", 11], ["orchestra", 25]]);
   for (const [template, count] of expected) {
@@ -290,6 +358,37 @@ test("templates share one score schema and preserve instrument snapshots", () =>
     assert.equal(validateScore(score).length, 0);
     assert.ok(score.parts.every((part) => part.instrument.catalogId && Number.isInteger(part.instrument.midiProgram)));
   }
+});
+
+test("grand-staff instruments create complete staff structures without changing saved instrument snapshots", () => {
+  const expectedLayouts = new Map([
+    ["piano", ["treble", "bass"]],
+    ["harp", ["treble", "bass"]],
+    ["celesta", ["treble", "bass"]],
+    ["harpsichord", ["treble", "bass"]],
+    ["accordion", ["treble", "bass"]],
+    ["harmonium", ["treble", "bass"]],
+    ["bandoneon", ["treble", "bass"]],
+    ["organ", ["treble", "bass", "bass"]],
+  ] as const);
+  for (const [catalogId, clefs] of expectedLayouts) {
+    assert.deepEqual(getInstrument(catalogId).staffClefs, clefs, catalogId);
+  }
+  assert.equal(getInstrument("violin").staffClefs, undefined);
+
+  const solo = createScore("solo", { seedDemo: false });
+  const piano = solo.parts[0];
+  assert.deepEqual(piano.staves.map((staff) => staff.clef), ["treble", "bass"]);
+  assert.equal("staffClefs" in piano.instrument, false, "the schema-v1 snapshot remains backward-compatible");
+  assert.ok(piano.staves.every((staff) => solo.measureOrder.every((measureId) => staff.measures[measureId]?.voices.length === 1)));
+  const allIds = piano.staves.flatMap((staff) => [staff.id, ...Object.values(staff.measures).flatMap((measure) => measure.voices.map((voice) => voice.id))]);
+  assert.equal(new Set(allIds).size, allIds.length);
+
+  const withOrgan = addInstrument(solo, "organ");
+  assert.deepEqual(withOrgan.parts.at(-1)!.staves.map((staff) => staff.clef), ["treble", "bass", "bass"]);
+  const orchestraHarp = createScore("orchestra", { seedDemo: false }).parts.find((part) => part.instrument.catalogId === "harp");
+  assert.deepEqual(orchestraHarp?.staves.map((staff) => staff.clef), ["treble", "bass"]);
+  assert.deepEqual(validateScore(JSON.parse(JSON.stringify(withOrgan))), []);
 });
 
 test("note entry advances to the next measure without overflow", () => {
@@ -306,6 +405,76 @@ test("note entry advances to the next measure without overflow", () => {
   const overflowResult = appendEvent(score, score.parts[0].id, makeEvent({ id: "next", pitch: { step: "D", alter: 0, octave: 4 }, duration: { base: 4, dots: 0 }, rest: false }));
   assert.equal(overflowResult.measureId, score.measureOrder[1]);
   assert.equal(getPrimaryVoice(overflowResult.score.parts[0], score.measureOrder[1]).events.length, 1);
+});
+
+test("staff-targeted entry, deletion, ties, counts, and auto-append stay isolated", () => {
+  let score = createScore("solo", { seedDemo: false });
+  const partId = score.parts[0].id;
+  const upperStaffId = score.parts[0].staves[0].id;
+  const lowerStaffId = score.parts[0].staves[1].id;
+  const firstMeasureId = score.measureOrder[0];
+  assert.equal(getPrimaryVoice(score.parts[0], firstMeasureId), getPrimaryVoice(score.parts[0], firstMeasureId, 0));
+
+  for (const id of ["lower-from", "lower-to"]) {
+    const result = appendEvent(score, partId, makeEvent({
+      id,
+      pitch: { step: "C", alter: 0, octave: 3 },
+      duration: { base: 4, dots: 0 },
+      rest: false,
+    }), lowerStaffId);
+    assert.equal(result.error, undefined);
+    assert.equal(result.measureId, firstMeasureId);
+    score = result.score;
+  }
+  assert.equal(getPrimaryVoice(score.parts[0], firstMeasureId, 0).events.length, 0);
+  assert.equal(getPrimaryVoice(score.parts[0], firstMeasureId, 1).events.length, 2);
+  assert.equal(eventCount(score, partId, upperStaffId), 0);
+  assert.equal(eventCount(score, partId, lowerStaffId), 2);
+  assert.equal(eventCount(score), 2);
+  assert.equal(findEventTargetMeasureId(score, partId, { base: 4, dots: 0 }, lowerStaffId), firstMeasureId);
+
+  const tied = toggleTieLastTwo(score, partId, 1);
+  assert.equal(tied.error, undefined);
+  assert.equal(tied.tied, true);
+  assert.equal(tied.score.ties.length, 1);
+  const removed = removeLastEvent(tied.score, partId, lowerStaffId);
+  assert.equal(eventCount(removed, partId, lowerStaffId), 1);
+  assert.equal(eventCount(removed, partId, upperStaffId), 0);
+  assert.equal(removed.ties.length, 0, "deleting from the selected staff also removes its tie");
+
+  const invalid = appendEvent(removed, partId, makeEvent({
+    id: "invalid-staff",
+    pitch: { step: "D", alter: 0, octave: 4 },
+    duration: { base: 4, dots: 0 },
+    rest: false,
+  }), "missing-staff");
+  assert.equal(invalid.score, removed);
+  assert.equal(invalid.measureId, null);
+  assert.match(invalid.error ?? "", /valid staff/);
+  assert.equal(findEventTargetMeasureId(removed, partId, { base: 4, dots: 0 }, "missing-staff"), null);
+
+  const autoAppend = createScore("solo", { seedDemo: false });
+  const autoPart = autoAppend.parts[0];
+  const autoLowerId = autoPart.staves[1].id;
+  autoAppend.measureOrder.forEach((measureId, index) => {
+    getPrimaryVoice(autoPart, measureId, 1).events.push(makeEvent({
+      id: `lower-full-${index}`,
+      pitch: { step: "C", alter: 0, octave: 3 },
+      duration: { base: 1, dots: 0 },
+      rest: false,
+    }));
+  });
+  const appended = appendEvent(autoAppend, autoPart.id, makeEvent({
+    id: "lower-auto-append",
+    pitch: { step: "D", alter: 0, octave: 3 },
+    duration: { base: 4, dots: 0 },
+    rest: false,
+  }), autoLowerId);
+  assert.equal(appended.error, undefined);
+  assert.equal(appended.score.measureOrder.length, 5);
+  assert.equal(getPrimaryVoice(appended.score.parts[0], appended.measureId!, 0).events.length, 0);
+  assert.equal(getPrimaryVoice(appended.score.parts[0], appended.measureId!, 1).events.length, 1);
+  assert.ok(appended.score.parts[0].staves.every((staff) => staff.measures[appended.measureId!]?.voices.length === 1));
 });
 
 test("explicit measure append inherits meter and key across every part, staff, and voice without ID collisions", () => {
@@ -349,7 +518,7 @@ test("automatic event entry reuses the complete append-measure path", () => {
   const score = createScore("solo", { seedDemo: false });
   const part = score.parts[0];
   const extraStaff = structuredClone(part.staves[0]);
-  extraStaff.id = `${part.id}-staff-2`;
+  extraStaff.id = `${part.id}-staff-${part.staves.length + 1}`;
   Object.entries(extraStaff.measures).forEach(([measureId, measure]) => {
     measure.voices = [{ id: `${extraStaff.id}-${measureId}-v1`, events: [] }];
   });
@@ -473,6 +642,14 @@ test("validator rejects overflow but permits an incomplete draft", () => {
     makeEvent({ id: "quarter", pitch: { step: "D", alter: 0, octave: 4 }, duration: { base: 4, dots: 0 }, rest: false }),
   );
   assert.match(validateScore(draft).join("\n"), /exceeds its time signature/);
+
+  const lowerStaffDraft = createScore("solo", { seedDemo: false });
+  const lowerVoice = getPrimaryVoice(lowerStaffDraft.parts[0], lowerStaffDraft.measureOrder[0], 1);
+  lowerVoice.events.push(
+    makeEvent({ id: "lower-whole", pitch: { step: "C", alter: 0, octave: 3 }, duration: { base: 1, dots: 0 }, rest: false }),
+    makeEvent({ id: "lower-quarter", pitch: { step: "D", alter: 0, octave: 3 }, duration: { base: 4, dots: 0 }, rest: false }),
+  );
+  assert.match(validateScore(lowerStaffDraft).join("\n"), /staff 2, measure 1 exceeds/);
 });
 
 test("a tie connects adjacent matching pitches and round-trips to MusicXML", () => {

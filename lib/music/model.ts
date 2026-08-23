@@ -76,6 +76,8 @@ export interface StaffData {
   measures: Record<string, StaffMeasure>;
 }
 
+export type StaffSelector = number | string;
+
 export interface PartData {
   id: string;
   name: string;
@@ -152,17 +154,40 @@ export function writtenToSounding(pitch: Pitch, transposition: Transposition): n
   return writtenMidi(pitch) + transposition.chromatic + transposition.octaveChange * 12;
 }
 
-export function getPrimaryVoice(part: PartData, measureId: string): VoiceData {
-  return part.staves[0]?.measures[measureId]?.voices[0] ?? { id: `${part.id}-${measureId}-v1`, events: [] };
+/** Resolves a zero-based staff index or a persisted staff ID without guessing on invalid input. */
+export function resolveStaffIndex(part: PartData, staffIdOrIndex: StaffSelector = 0): number {
+  if (typeof staffIdOrIndex === "number") {
+    return Number.isInteger(staffIdOrIndex) && staffIdOrIndex >= 0 && staffIdOrIndex < part.staves.length ? staffIdOrIndex : -1;
+  }
+  return part.staves.findIndex((staff) => staff.id === staffIdOrIndex);
 }
 
-export function eventCount(score: ScoreDocument): number {
-  return score.parts.reduce(
-    (partTotal, part) =>
-      partTotal +
-      score.measureOrder.reduce((measureTotal, measureId) => measureTotal + getPrimaryVoice(part, measureId).events.length, 0),
+export function getPrimaryVoice(part: PartData, measureId: string, staffIndex = 0): VoiceData {
+  const staff = part.staves[staffIndex];
+  const fallbackPrefix = staffIndex === 0 ? part.id : staff?.id ?? `${part.id}-staff-${staffIndex + 1}`;
+  return staff?.measures[measureId]?.voices[0] ?? { id: `${fallbackPrefix}-${measureId}-v1`, events: [] };
+}
+
+/** Counts every staff by default, or one selected staff when a part ID is supplied. */
+export function eventCount(score: ScoreDocument, partId?: string, staffIdOrIndex: StaffSelector = 0): number {
+  if (partId !== undefined) {
+    const part = score.parts.find((candidate) => candidate.id === partId);
+    if (!part) return 0;
+    const staffIndex = resolveStaffIndex(part, staffIdOrIndex);
+    if (staffIndex < 0) return 0;
+    return score.measureOrder.reduce(
+      (total, measureId) => total + getPrimaryVoice(part, measureId, staffIndex).events.length,
+      0,
+    );
+  }
+
+  return score.parts.reduce((scoreTotal, part) => scoreTotal + part.staves.reduce(
+    (partTotal, _staff, staffIndex) => partTotal + score.measureOrder.reduce(
+      (measureTotal, measureId) => measureTotal + getPrimaryVoice(part, measureId, staffIndex).events.length,
+      0,
+    ),
     0,
-  );
+  ), 0);
 }
 
 export function validateScore(score: unknown, requireComplete = false): string[] {
@@ -193,17 +218,20 @@ export function validateScore(score: unknown, requireComplete = false): string[]
       errors.push(`${part.name || "Part"} has an invalid transposition snapshot.`);
       continue;
     }
-    for (const measureId of candidate.measureOrder) {
-      const measure = candidate.measures[measureId];
-      if (!measure) {
-        errors.push(`Missing measure ${measureId}.`);
-        continue;
+    part.staves.forEach((_staff, staffIndex) => {
+      for (const measureId of candidate.measureOrder!) {
+        const measure = candidate.measures![measureId];
+        if (!measure) {
+          errors.push(`Missing measure ${measureId}.`);
+          continue;
+        }
+        const used = voiceTicks(getPrimaryVoice(part, measureId, staffIndex));
+        const capacity = measureCapacity(measure);
+        const staffLabel = part.staves.length > 1 ? `${part.name}, staff ${staffIndex + 1}` : part.name;
+        if (used > capacity) errors.push(`${staffLabel}, measure ${measure.number} exceeds its time signature.`);
+        if (requireComplete && used !== capacity) errors.push(`${staffLabel}, measure ${measure.number} is incomplete.`);
       }
-      const used = voiceTicks(getPrimaryVoice(part, measureId));
-      const capacity = measureCapacity(measure);
-      if (used > capacity) errors.push(`${part.name}, measure ${measure.number} exceeds its time signature.`);
-      if (requireComplete && used !== capacity) errors.push(`${part.name}, measure ${measure.number} is incomplete.`);
-    }
+    });
   }
   return errors;
 }

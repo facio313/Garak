@@ -1,6 +1,6 @@
-import type { Clef, MusicEvent, ScoreDocument } from "./model";
+import type { Clef, MusicEvent, PartData, ScoreDocument, VoiceData } from "./model";
 import { writtenKeyForPart } from "./key-signatures";
-import { durationTicks, getPrimaryVoice, measureCapacity, validateScore, writtenToSounding } from "./model";
+import { durationTicks, measureCapacity, validateScore, writtenToSounding } from "./model";
 
 const XML_TYPES = { 1: "whole", 2: "half", 4: "quarter", 8: "eighth", 16: "16th" } as const;
 const CLEFS: Record<Clef, { sign: string; line: number }> = {
@@ -29,7 +29,11 @@ export function scoreToMusicXML(score: ScoreDocument): string {
     </score-part>`).join("");
 
   const parts = score.parts.map((part) => {
-    const clef = CLEFS[part.staves[0].clef];
+    const multiStaff = part.staves.length > 1;
+    const clefs = part.staves.map((staff, staffIndex) => {
+      const clef = CLEFS[staff.clef];
+      return `<clef${multiStaff ? ` number="${staffIndex + 1}"` : ""}><sign>${clef.sign}</sign><line>${clef.line}</line></clef>`;
+    }).join("");
     const measures = score.measureOrder.map((measureId, measureIndex) => {
       const measure = score.measures[measureId];
       const previousMeasure = measureIndex ? score.measures[score.measureOrder[measureIndex - 1]] : null;
@@ -37,18 +41,30 @@ export function scoreToMusicXML(score: ScoreDocument): string {
       const previousWrittenKey = previousMeasure ? writtenKeyForPart(previousMeasure.key, part) : null;
       const keyChanged = !previousWrittenKey || previousWrittenKey.fifths !== writtenKey.fifths || previousWrittenKey.mode !== writtenKey.mode;
       const timeChanged = !previousMeasure || previousMeasure.time.numerator !== measure.time.numerator || previousMeasure.time.denominator !== measure.time.denominator;
-      const voice = getPrimaryVoice(part, measureId);
       const attributes = measureIndex === 0 || keyChanged || timeChanged ? `
         <attributes>
           ${measureIndex === 0 ? "<divisions>960</divisions>" : ""}
           ${keyChanged ? `<key><fifths>${writtenKey.fifths}</fifths><mode>${writtenKey.mode}</mode></key>` : ""}
           ${timeChanged ? `<time><beats>${measure.time.numerator}</beats><beat-type>${measure.time.denominator}</beat-type></time>` : ""}
-          ${measureIndex === 0 ? `<clef><sign>${clef.sign}</sign><line>${clef.line}</line></clef>` : ""}
+          ${measureIndex === 0 && multiStaff ? `<staves>${part.staves.length}</staves>` : ""}
+          ${measureIndex === 0 ? clefs : ""}
           ${measureIndex === 0 ? `<transpose><diatonic>${part.instrument.transposition.diatonic}</diatonic><chromatic>${part.instrument.transposition.chromatic}</chromatic><octave-change>${part.instrument.transposition.octaveChange}</octave-change></transpose>` : ""}
         </attributes>` : "";
-      const notes = voice.events.length
-        ? voice.events.map((event) => eventToXML(event, tiedFrom, tiedTo)).join("")
-        : fullMeasureRestToXML(measureCapacity(measure));
+      const measureDuration = measureCapacity(measure);
+      const staffStreams = part.staves.map((_, staffIndex) => {
+        const voice = getStaffPrimaryVoice(part, measureId, staffIndex);
+        const voiceNumber = staffIndex + 1;
+        const staffNumber = multiStaff ? staffIndex + 1 : undefined;
+        return {
+          duration: voice.events.length ? voice.events.reduce((sum, event) => sum + durationTicks(event.duration), 0) : measureDuration,
+          notes: voice.events.length
+            ? voice.events.map((event) => eventToXML(event, tiedFrom, tiedTo, voiceNumber, staffNumber)).join("")
+            : fullMeasureRestToXML(measureDuration, voiceNumber, staffNumber),
+        };
+      });
+      const notes = staffStreams.map((stream, staffIndex) =>
+        `${staffIndex ? backupToXML(staffStreams[staffIndex - 1].duration) : ""}${stream.notes}`,
+      ).join("");
       return `
       <measure number="${measure.number}">${attributes}${notes}
       </measure>`;
@@ -68,22 +84,42 @@ export function scoreToMusicXML(score: ScoreDocument): string {
 </score-partwise>`;
 }
 
-function fullMeasureRestToXML(duration: number): string {
-  return `
-        <note><rest measure="yes"/><duration>${duration}</duration><voice>1</voice></note>`;
+function getStaffPrimaryVoice(part: PartData, measureId: string, staffIndex: number): VoiceData {
+  return part.staves[staffIndex]?.measures[measureId]?.voices[0] ?? {
+    id: `${part.id}-${measureId}-staff-${staffIndex + 1}-v1`,
+    events: [],
+  };
 }
 
-function eventToXML(event: MusicEvent, tiedFrom: Set<string>, tiedTo: Set<string>): string {
+function backupToXML(duration: number): string {
+  return `
+        <backup><duration>${duration}</duration></backup>`;
+}
+
+function fullMeasureRestToXML(duration: number, voiceNumber = 1, staffNumber?: number): string {
+  const staff = staffNumber === undefined ? "" : `<staff>${staffNumber}</staff>`;
+  return `
+        <note><rest measure="yes"/><duration>${duration}</duration><voice>${voiceNumber}</voice>${staff}</note>`;
+}
+
+function eventToXML(
+  event: MusicEvent,
+  tiedFrom: Set<string>,
+  tiedTo: Set<string>,
+  voiceNumber = 1,
+  staffNumber?: number,
+): string {
   const type = XML_TYPES[event.duration.base];
   const duration = durationTicks(event.duration);
+  const staff = staffNumber === undefined ? "" : `<staff>${staffNumber}</staff>`;
   if (event.kind === "rest") return `
-        <note><rest/><duration>${duration}</duration><voice>1</voice><type>${type}</type>${event.duration.dots ? "<dot/>" : ""}</note>`;
+        <note><rest/><duration>${duration}</duration><voice>${voiceNumber}</voice><type>${type}</type>${event.duration.dots ? "<dot/>" : ""}${staff}</note>`;
   return event.notes.map((note, noteIndex) => {
     const tieStart = tiedFrom.has(note.id);
     const tieStop = tiedTo.has(note.id);
     const accidental = note.pitch.alter === -2 ? "flat-flat" : note.pitch.alter === -1 ? "flat" : note.pitch.alter === 1 ? "sharp" : note.pitch.alter === 2 ? "double-sharp" : "natural";
     return `
-        <note>${noteIndex ? "<chord/>" : ""}<pitch><step>${note.pitch.step}</step>${note.pitch.alter ? `<alter>${note.pitch.alter}</alter>` : ""}<octave>${note.pitch.octave}</octave></pitch><duration>${duration}</duration>${tieStop ? '<tie type="stop"/>' : ""}${tieStart ? '<tie type="start"/>' : ""}<voice>1</voice><type>${type}</type>${event.duration.dots ? "<dot/>" : ""}${note.accidentalDisplay === "force" ? `<accidental>${accidental}</accidental>` : ""}${tieStart || tieStop ? `<notations>${tieStop ? '<tied type="stop"/>' : ""}${tieStart ? '<tied type="start"/>' : ""}</notations>` : ""}</note>`;
+        <note>${noteIndex ? "<chord/>" : ""}<pitch><step>${note.pitch.step}</step>${note.pitch.alter ? `<alter>${note.pitch.alter}</alter>` : ""}<octave>${note.pitch.octave}</octave></pitch><duration>${duration}</duration>${tieStop ? '<tie type="stop"/>' : ""}${tieStart ? '<tie type="start"/>' : ""}<voice>${voiceNumber}</voice><type>${type}</type>${event.duration.dots ? "<dot/>" : ""}${note.accidentalDisplay === "force" ? `<accidental>${accidental}</accidental>` : ""}${staff}${tieStart || tieStop ? `<notations>${tieStop ? '<tied type="stop"/>' : ""}${tieStart ? '<tied type="start"/>' : ""}</notations>` : ""}</note>`;
   }).join("");
 }
 
@@ -128,19 +164,21 @@ function collectTimedNotes(score: ScoreDocument): TimedNote[] {
   score.parts.forEach((part) => {
     let measureStart = 0;
     score.measureOrder.forEach((measureId) => {
-      let cursor = measureStart;
-      getPrimaryVoice(part, measureId).events.forEach((event) => {
-        const ticks = durationTicks(event.duration);
-        if (event.kind === "note") {
-          event.notes.forEach((note) => notes.push({
-            noteId: note.id,
-            partId: part.id,
-            midi: Math.max(0, Math.min(127, writtenToSounding(note.pitch, part.instrument.transposition))),
-            startTicks: cursor,
-            durationTicks: ticks,
-          }));
-        }
-        cursor += ticks;
+      part.staves.forEach((_, staffIndex) => {
+        let cursor = measureStart;
+        getStaffPrimaryVoice(part, measureId, staffIndex).events.forEach((event) => {
+          const ticks = durationTicks(event.duration);
+          if (event.kind === "note") {
+            event.notes.forEach((note) => notes.push({
+              noteId: note.id,
+              partId: part.id,
+              midi: Math.max(0, Math.min(127, writtenToSounding(note.pitch, part.instrument.transposition))),
+              startTicks: cursor,
+              durationTicks: ticks,
+            }));
+          }
+          cursor += ticks;
+        });
       });
       measureStart += measureCapacity(score.measures[measureId]);
     });

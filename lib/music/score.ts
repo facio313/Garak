@@ -1,8 +1,8 @@
 import { getInstrument, SCORE_TEMPLATES } from "./catalog";
 import { assertKeySignature } from "./key-signatures";
 import type { KeySignature } from "./key-signatures";
-import type { DurationValue, InstrumentSnapshot, MusicEvent, PartData, Pitch, ScoreDocument, ScoreNote } from "./model";
-import { durationTicks, getPrimaryVoice, measureCapacity, voiceTicks } from "./model";
+import type { DurationValue, InstrumentSnapshot, MusicEvent, PartData, Pitch, ScoreDocument, ScoreNote, StaffSelector } from "./model";
+import { durationTicks, getPrimaryVoice, measureCapacity, resolveStaffIndex, voiceTicks } from "./model";
 
 const LETTERS = ["C", "D", "E", "F", "G", "A", "B"] as const;
 
@@ -21,7 +21,9 @@ function cloneInstrument(catalogId: string): InstrumentSnapshot {
 }
 
 function makePart(catalogId: string, index: number, measureIds: string[], occurrence = 1, totalOccurrences = 1): PartData {
+  const definition = getInstrument(catalogId);
   const instrument = cloneInstrument(catalogId);
+  const staffClefs = definition.staffClefs?.length ? [...definition.staffClefs] : [instrument.clef];
   const roman = ["I", "II", "III", "IV", "V", "VI"][occurrence - 1] ?? String(occurrence);
   const name = totalOccurrences > 1 ? `${instrument.name} ${roman}` : instrument.name;
   const partId = `part-${index + 1}-${catalogId}`;
@@ -32,11 +34,17 @@ function makePart(catalogId: string, index: number, measureIds: string[], occurr
     instrument,
     muted: false,
     solo: false,
-    staves: [{
-      id: `${partId}-staff-1`,
-      clef: instrument.clef,
-      measures: Object.fromEntries(measureIds.map((measureId) => [measureId, { voices: [{ id: `${partId}-${measureId}-v1`, events: [] }] }])),
-    }],
+    staves: staffClefs.map((clef, staffIndex) => {
+      const staffId = `${partId}-staff-${staffIndex + 1}`;
+      const voicePrefix = staffIndex === 0 ? partId : staffId;
+      return {
+        id: staffId,
+        clef,
+        measures: Object.fromEntries(measureIds.map((measureId) => [measureId, {
+          voices: [{ id: `${voicePrefix}-${measureId}-v1`, events: [] }],
+        }])),
+      };
+    }),
   };
 }
 
@@ -222,21 +230,35 @@ export function removeLastMeasure(score: ScoreDocument): RemoveLastMeasureResult
 }
 
 /** Finds the existing measure that the sequential-entry command will use, if one has room. */
-export function findEventTargetMeasureId(score: ScoreDocument, partId: string, duration: DurationValue): string | null {
+export function findEventTargetMeasureId(
+  score: ScoreDocument,
+  partId: string,
+  duration: DurationValue,
+  staffIdOrIndex: StaffSelector = 0,
+): string | null {
   const part = score.parts.find((item) => item.id === partId);
   if (!part) return null;
+  const staffIndex = resolveStaffIndex(part, staffIdOrIndex);
+  if (staffIndex < 0) return null;
   return score.measureOrder.find((measureId) => {
-    const voice = getPrimaryVoice(part, measureId);
+    const voice = getPrimaryVoice(part, measureId, staffIndex);
     return voiceTicks(voice) + durationTicks(duration) <= measureCapacity(score.measures[measureId]);
   }) ?? null;
 }
 
-export function appendEvent(score: ScoreDocument, partId: string, event: MusicEvent): { score: ScoreDocument; measureId: string | null; error?: string } {
+export function appendEvent(
+  score: ScoreDocument,
+  partId: string,
+  event: MusicEvent,
+  staffIdOrIndex: StaffSelector = 0,
+): { score: ScoreDocument; measureId: string | null; error?: string } {
   const next = structuredClone(score);
   const part = next.parts.find((item) => item.id === partId);
   if (!part) return { score, measureId: null, error: "Select an instrument first." };
+  const staffIndex = resolveStaffIndex(part, staffIdOrIndex);
+  if (staffIndex < 0) return { score, measureId: null, error: "Select a valid staff first." };
 
-  let targetMeasureId = findEventTargetMeasureId(next, partId, event.duration) ?? undefined;
+  let targetMeasureId = findEventTargetMeasureId(next, partId, event.duration, staffIndex) ?? undefined;
 
   if (!targetMeasureId) {
     const previousMeasureId = next.measureOrder.at(-1);
@@ -248,17 +270,21 @@ export function appendEvent(score: ScoreDocument, partId: string, event: MusicEv
     targetMeasureId = appendEmptyMeasure(next);
   }
 
-  const target = next.parts.find((item) => item.id === partId)!;
-  target.staves[0].measures[targetMeasureId].voices[0].events.push(event);
+  const voice = part.staves[staffIndex].measures[targetMeasureId]?.voices[0];
+  if (!voice) return { score, measureId: null, error: "The selected staff is missing measure structure." };
+  voice.events.push(event);
   return { score: stamp(next), measureId: targetMeasureId };
 }
 
-export function removeLastEvent(score: ScoreDocument, partId: string): ScoreDocument {
+export function removeLastEvent(score: ScoreDocument, partId: string, staffIdOrIndex: StaffSelector = 0): ScoreDocument {
   const next = structuredClone(score);
   const part = next.parts.find((item) => item.id === partId);
   if (!part) return score;
+  const staffIndex = resolveStaffIndex(part, staffIdOrIndex);
+  if (staffIndex < 0) return score;
   for (let index = next.measureOrder.length - 1; index >= 0; index -= 1) {
-    const events = part.staves[0].measures[next.measureOrder[index]].voices[0].events;
+    const events = part.staves[staffIndex].measures[next.measureOrder[index]]?.voices[0]?.events;
+    if (!events) continue;
     if (events.length) {
       const [removed] = events.splice(events.length - 1, 1);
       if (removed.kind === "note") {
@@ -271,10 +297,16 @@ export function removeLastEvent(score: ScoreDocument, partId: string): ScoreDocu
   return score;
 }
 
-export function toggleTieLastTwo(score: ScoreDocument, partId: string): { score: ScoreDocument; tied: boolean; error?: string } {
+export function toggleTieLastTwo(
+  score: ScoreDocument,
+  partId: string,
+  staffIdOrIndex: StaffSelector = 0,
+): { score: ScoreDocument; tied: boolean; error?: string } {
   const part = score.parts.find((item) => item.id === partId);
   if (!part) return { score, tied: false, error: "Select an instrument first." };
-  const events = score.measureOrder.flatMap((measureId) => getPrimaryVoice(part, measureId).events);
+  const staffIndex = resolveStaffIndex(part, staffIdOrIndex);
+  if (staffIndex < 0) return { score, tied: false, error: "Select a valid staff first." };
+  const events = score.measureOrder.flatMap((measureId) => getPrimaryVoice(part, measureId, staffIndex).events);
   const previous = events.at(-2);
   const current = events.at(-1);
   if (!previous || !current || previous.kind !== "note" || current.kind !== "note") {

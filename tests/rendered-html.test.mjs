@@ -38,17 +38,21 @@ test("server-renders the Garak notation studio", async () => {
 });
 
 test("ships product metadata and removes the disposable starter", async () => {
-  const [page, layout, packageJson, og] = await Promise.all([
+  const [page, layout, packageJson, og, studio] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
     readFile(new URL("../public/og.png", import.meta.url)),
+    readFile(new URL("../components/NotationStudio.tsx", import.meta.url), "utf8"),
   ]);
   assert.match(page, /NotationStudio/);
   assert.match(layout, /Garak — Orchestra notation studio/);
   assert.match(packageJson, /"vexflow"/);
   assert.match(packageJson, /"lucide-react"/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
+  assert.match(studio, /staff selection/);
+  assert.ok(studio.includes('aria-label={`Select staff ${staffIndex + 1}, ${staff.clef} clef`}'));
+  assert.ok(studio.includes("selectedStaffId={selectedStaff?.id}"));
   assert.deepEqual([...og.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
   assert.equal(og.readUInt32BE(16), 1200);
   assert.equal(og.readUInt32BE(20), 630);

@@ -29,7 +29,7 @@ import { collectPlaybackNotes, scoreToMidi, scoreToMusicXML } from "../lib/music
 import { KEY_SIGNATURES, keySignatureAlterForStep, keySignatureName, writtenKeyForPart } from "../lib/music/key-signatures";
 import type { KeySignature } from "../lib/music/key-signatures";
 import type { DurationBase, DurationValue, PitchStep, ScoreDocument } from "../lib/music/model";
-import { DURATION_LABELS, TICKS_PER_WHOLE, eventCount, getPrimaryVoice, pitchName, validateScore, voiceTicks } from "../lib/music/model";
+import { DURATION_LABELS, TICKS_PER_WHOLE, eventCount, getPrimaryVoice, pitchName, resolveStaffIndex, validateScore, voiceTicks } from "../lib/music/model";
 import { addInstrument, appendEvent, appendMeasure, createScore, findEventTargetMeasureId, makeEvent, removeInstrument, removeLastEvent, removeLastMeasure, setScoreKey, toggleTieLastTwo, updatePart } from "../lib/music/score";
 import { DurationIcon } from "./DurationIcon";
 import { ScoreRenderer } from "./ScoreRenderer";
@@ -74,11 +74,18 @@ function safeFilename(title: string): string {
   return title.trim().replace(/[^\p{L}\p{N}._-]+/gu, "-").replace(/^-|-$/g, "") || "garak-score";
 }
 
+function safeSelection(score: ScoreDocument, preferredPartId?: string, preferredStaffId?: string) {
+  const part = score.parts.find((candidate) => candidate.id === preferredPartId) ?? score.parts[0];
+  const staff = part?.staves.find((candidate) => candidate.id === preferredStaffId) ?? part?.staves[0];
+  return { partId: part?.id ?? "", staffId: staff?.id ?? "" };
+}
+
 export function NotationStudio() {
   const [score, setScore] = useState<ScoreDocument>(() => createScore("chamber"));
   const [past, setPast] = useState<ScoreDocument[]>([]);
   const [future, setFuture] = useState<ScoreDocument[]>([]);
   const [selectedPartId, setSelectedPartId] = useState(() => createScore("chamber").parts[0].id);
+  const [selectedStaffId, setSelectedStaffId] = useState(() => createScore("chamber").parts[0].staves[0].id);
   const [viewMode, setViewMode] = useState<"score" | "part">("score");
   const [duration, setDuration] = useState<DurationBase>(4);
   const [dotted, setDotted] = useState(false);
@@ -104,11 +111,30 @@ export function NotationStudio() {
   const saveTimerRef = useRef<number | null>(null);
 
   const selectedPart = score.parts.find((part) => part.id === selectedPartId) ?? score.parts[0];
+  const resolvedStaffIndex = selectedPart ? resolveStaffIndex(selectedPart, selectedStaffId) : -1;
+  const selectedStaffIndex = resolvedStaffIndex >= 0 ? resolvedStaffIndex : 0;
+  const selectedStaff = selectedPart?.staves[selectedStaffIndex];
+  const activeStaffId = selectedStaff?.id ?? "";
+  const selectedStaffNumber = selectedStaffIndex + 1;
   const initialConcertKey = score.measures[score.measureOrder[0]].key;
   const selectedWrittenKey = selectedPart ? writtenKeyForPart(initialConcertKey, selectedPart) : initialConcertKey;
-  const selectedEvents = selectedPart ? score.measureOrder.flatMap((measureId) => getPrimaryVoice(selectedPart, measureId).events) : [];
+  const selectedEvents = selectedPart ? score.measureOrder.flatMap((measureId) => getPrimaryVoice(selectedPart, measureId, selectedStaffIndex).events) : [];
   const lastEvent = selectedEvents.at(-1);
-  const totalEvents = eventCount(score);
+  const totalEvents = selectedPart && selectedStaff ? eventCount(score, selectedPart.id, selectedStaff.id) : 0;
+
+  const selectPart = useCallback((partId: string) => {
+    const part = score.parts.find((candidate) => candidate.id === partId);
+    if (!part) return;
+    setSelectedPartId(part.id);
+    setSelectedStaffId((current) => part.staves.some((staff) => staff.id === current) ? current : part.staves[0]?.id ?? "");
+  }, [score.parts]);
+
+  const selectStaff = useCallback((staffId: string) => {
+    const part = score.parts.find((candidate) => candidate.staves.some((staff) => staff.id === staffId));
+    if (!part) return;
+    setSelectedPartId(part.id);
+    setSelectedStaffId(staffId);
+  }, [score.parts]);
 
   const commit = useCallback((next: ScoreDocument, message: string) => {
     if (next === score) {
@@ -128,9 +154,11 @@ export function NotationStudio() {
     setFuture((items) => [score, ...items].slice(0, HISTORY_LIMIT));
     setScore(previous);
     setMetadataDraft(previous.metadata);
-    setSelectedPartId((current) => previous.parts.some((part) => part.id === current) ? current : previous.parts[0]?.id ?? "");
+    const selection = safeSelection(previous, selectedPartId, selectedStaffId);
+    setSelectedPartId(selection.partId);
+    setSelectedStaffId(selection.staffId);
     setStatus("Undid the last edit");
-  }, [past, score]);
+  }, [past, score, selectedPartId, selectedStaffId]);
 
   const redo = useCallback(() => {
     if (!future.length) return;
@@ -139,9 +167,11 @@ export function NotationStudio() {
     setPast((items) => [...items.slice(-(HISTORY_LIMIT - 1)), score]);
     setScore(next);
     setMetadataDraft(next.metadata);
-    setSelectedPartId((current) => next.parts.some((part) => part.id === current) ? current : next.parts[0]?.id ?? "");
+    const selection = safeSelection(next, selectedPartId, selectedStaffId);
+    setSelectedPartId(selection.partId);
+    setSelectedStaffId(selection.staffId);
     setStatus("Redid the edit");
-  }, [future, score]);
+  }, [future, score, selectedPartId, selectedStaffId]);
 
   useEffect(() => {
     queueMicrotask(() => {
@@ -152,7 +182,9 @@ export function NotationStudio() {
           const errors = validateScore(stored);
           if (!errors.length) {
             setScore(stored);
-            setSelectedPartId(stored.parts[0].id);
+            const selection = safeSelection(stored);
+            setSelectedPartId(selection.partId);
+            setSelectedStaffId(selection.staffId);
             setMetadataDraft(stored.metadata);
             setStatus("Recovered your local score");
           } else setStatus("Started a fresh score — the saved draft was incompatible");
@@ -233,10 +265,10 @@ export function NotationStudio() {
   }, [playing, score, stopPlayback]);
 
   const enterEvent = useCallback((step: PitchStep, forceRest = false) => {
-    if (!selectedPart) return;
+    if (!selectedPart || !activeStaffId) return;
     const eventId = `event-${Date.now()}-${eventSequence.current++}`;
     const durationValue: DurationValue = { base: duration, dots: dotted ? 1 : 0 };
-    const targetMeasureId = findEventTargetMeasureId(score, selectedPart.id, durationValue) ?? score.measureOrder.at(-1)!;
+    const targetMeasureId = findEventTargetMeasureId(score, selectedPart.id, durationValue, activeStaffId) ?? score.measureOrder.at(-1)!;
     const entryWrittenKey = writtenKeyForPart(score.measures[targetMeasureId].key, selectedPart);
     const alter = inputAlter(accidentalMode, entryWrittenKey, step);
     const event = makeEvent({
@@ -246,17 +278,17 @@ export function NotationStudio() {
       rest: restMode || forceRest,
       accidentalDisplay: accidentalMode === "auto" ? "auto" : "force",
     });
-    const result = appendEvent(score, selectedPart.id, event);
+    const result = appendEvent(score, selectedPart.id, event, activeStaffId);
     if (result.error) setStatus(result.error);
-    else commit(result.score, `${event.kind === "rest" ? "Entered rest" : `Entered ${pitchName(event.notes[0].pitch)}`} · ${DURATION_LABELS[duration]}`);
-  }, [accidentalMode, commit, dotted, duration, octave, restMode, score, selectedPart]);
+    else commit(result.score, `${event.kind === "rest" ? "Entered rest" : `Entered ${pitchName(event.notes[0].pitch)}`} · ${DURATION_LABELS[duration]} · staff ${selectedStaffNumber}`);
+  }, [accidentalMode, activeStaffId, commit, dotted, duration, octave, restMode, score, selectedPart, selectedStaffNumber]);
 
   const toggleTie = useCallback(() => {
-    if (!selectedPart) return;
-    const result = toggleTieLastTwo(score, selectedPart.id);
+    if (!selectedPart || !activeStaffId) return;
+    const result = toggleTieLastTwo(score, selectedPart.id, activeStaffId);
     if (result.error) setStatus(result.error);
     else commit(result.score, result.tied ? "Tied the last two notes" : "Removed the tie");
-  }, [commit, score, selectedPart]);
+  }, [activeStaffId, commit, score, selectedPart]);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -274,7 +306,7 @@ export function NotationStudio() {
       if (event.key === " ") { event.preventDefault(); playScore(); return; }
       if (event.key === "Backspace" || event.key === "Delete") {
         event.preventDefault();
-        if (selectedPart) commit(removeLastEvent(score, selectedPart.id), "Removed the last event");
+        if (selectedPart && activeStaffId) commit(removeLastEvent(score, selectedPart.id, activeStaffId), `Removed the last event from staff ${selectedStaffNumber}`);
         return;
       }
       if (event.key === ".") { event.preventDefault(); setDotted((value) => !value); return; }
@@ -297,7 +329,7 @@ export function NotationStudio() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [commit, enterEvent, playScore, redo, saveNow, score, selectedPart, toggleTie, undo]);
+  }, [activeStaffId, commit, enterEvent, playScore, redo, saveNow, score, selectedPart, selectedStaffNumber, toggleTie, undo]);
 
   useEffect(() => () => {
     if (playbackTimerRef.current) window.clearInterval(playbackTimerRef.current);
@@ -314,10 +346,12 @@ export function NotationStudio() {
 
   const createFromTemplate = (templateId: string) => {
     const next = createScore(templateId, false);
+    const selection = safeSelection(next);
     setScore(next);
     setPast([]);
     setFuture([]);
-    setSelectedPartId(next.parts[0].id);
+    setSelectedPartId(selection.partId);
+    setSelectedStaffId(selection.staffId);
     setViewMode("score");
     setNewOpen(false);
     setStatus(`Created ${next.metadata.subtitle}`);
@@ -333,7 +367,9 @@ export function NotationStudio() {
       setScore(parsed);
       setPast([]);
       setFuture([]);
-      setSelectedPartId(parsed.parts[0].id);
+      const selection = safeSelection(parsed);
+      setSelectedPartId(selection.partId);
+      setSelectedStaffId(selection.staffId);
       setStatus(`Opened ${parsed.metadata.title}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "The score file could not be opened.");
@@ -385,7 +421,9 @@ export function NotationStudio() {
   const setMeter = (value: string) => {
     const [numerator, denominator] = value.split("/").map(Number);
     const capacity = numerator * TICKS_PER_WHOLE / denominator;
-    const overflow = score.parts.some((part) => score.measureOrder.some((measureId) => voiceTicks(getPrimaryVoice(part, measureId)) > capacity));
+    const overflow = score.parts.some((part) => part.staves.some((_staff, staffIndex) =>
+      score.measureOrder.some((measureId) => voiceTicks(getPrimaryVoice(part, measureId, staffIndex)) > capacity),
+    ));
     if (overflow) {
       setStatus(`Cannot change to ${value}: at least one measure contains more music than it can hold.`);
       return;
@@ -493,10 +531,10 @@ export function NotationStudio() {
           <div className="panel-heading"><div><span className="eyebrow">{score.parts.length} PARTS</span><h2>Instruments</h2></div><button className="round-button" onClick={() => setAddOpen(true)} aria-label="Add instrument"><Plus size={15} /></button></div>
           <div className="instrument-list">
             {score.parts.map((part, index) => (
-              <button className={`instrument-row ${part.id === selectedPartId ? "selected" : ""}`} key={part.id} onClick={() => setSelectedPartId(part.id)}>
+              <button className={`instrument-row ${part.id === selectedPartId ? "selected" : ""}`} key={part.id} onClick={() => selectPart(part.id)}>
                 <span className="family-line" style={{ background: part.instrument.color }} />
                 <span className="instrument-index">{String(index + 1).padStart(2, "0")}</span>
-                <span className="instrument-name"><strong>{part.name}</strong><small>{part.instrument.family}{part.instrument.transposition.chromatic || part.instrument.transposition.octaveChange ? " · transposing" : ""}</small></span>
+                <span className="instrument-name"><strong>{part.name}</strong><small>{part.instrument.family}{part.staves.length > 1 ? ` · ${part.staves.length} staves` : ""}{part.instrument.transposition.chromatic || part.instrument.transposition.octaveChange ? " · transposing" : ""}</small></span>
                 <span className="mini-mixers"><span className={part.muted ? "on" : ""} title="Muted">M</span><span className={part.solo ? "on" : ""} title="Solo">S</span></span>
               </button>
             ))}
@@ -507,7 +545,7 @@ export function NotationStudio() {
 
         <section className="canvas-area" aria-label="Score canvas">
           <div className="canvas-controls">
-            <span>{viewMode === "score" ? `${score.parts.length}-part score` : selectedPart?.name}</span><span className="separator">•</span><span>{score.measureOrder.length} measures</span><span className="separator">•</span><span>{totalEvents} events</span>
+            <span>{viewMode === "score" ? `${score.parts.length}-part score` : selectedPart?.name}</span><span className="separator">•</span><span>{score.measureOrder.length} measures</span><span className="separator">•</span><span>{totalEvents} {selectedPart && selectedPart.staves.length > 1 ? "staff events" : "events"}</span>
             <span className="tool-section" role="group" aria-label="Measure controls">
               <button className="mode-pill" onClick={addEmptyMeasure} aria-label="Add empty measure"><Plus size={11} aria-hidden="true" /> Measure</button>
               <button className="mode-pill" onClick={removeEmptyMeasure} aria-label="Remove last empty measure"><Trash2 size={11} aria-hidden="true" /> Remove empty measure</button>
@@ -517,7 +555,15 @@ export function NotationStudio() {
           <article className="score-page">
             <div className="score-heading"><p>{score.metadata.subtitle.toUpperCase()}</p><h1>{score.metadata.title}</h1><span>{score.metadata.composer}</span></div>
             {playing ? <div className="playhead" style={{ left: `${12 + playhead * .76}%` }} aria-hidden="true" /> : null}
-            <ScoreRenderer score={score} selectedPartId={selectedPartId} viewMode={viewMode} zoom={zoom} onSelectPart={setSelectedPartId} />
+            <ScoreRenderer
+              score={score}
+              selectedPartId={selectedPartId}
+              selectedStaffId={selectedStaff?.id}
+              viewMode={viewMode}
+              zoom={zoom}
+              onSelectPart={selectPart}
+              onSelectStaff={selectStaff}
+            />
             <span className="page-number">1</span>
           </article>
         </section>
@@ -527,7 +573,7 @@ export function NotationStudio() {
           {selectedPart ? (
             <div className="selection-summary">
               <span className="selection-icon">{lastEvent?.kind === "rest" ? "𝄽" : "♪"}</span>
-              <span><strong>{lastEvent?.kind === "note" ? pitchName(lastEvent.notes[0].pitch) : lastEvent?.kind === "rest" ? "Rest" : selectedPart.name}</strong><small>{selectedPart.name} · {DURATION_LABELS[lastEvent?.duration.base ?? duration]}</small></span>
+              <span><strong>{lastEvent?.kind === "note" ? pitchName(lastEvent.notes[0].pitch) : lastEvent?.kind === "rest" ? "Rest" : selectedPart.name}</strong><small>{selectedPart.name}{selectedPart.staves.length > 1 ? ` · Staff ${selectedStaffIndex + 1}` : ""} · {DURATION_LABELS[lastEvent?.duration.base ?? duration]}</small></span>
             </div>
           ) : null}
           <div className="inspector-section">
@@ -546,11 +592,24 @@ export function NotationStudio() {
             <div className="inspector-section">
               <div className="section-title"><span>Part</span><span className="family-badge" style={{ color: selectedPart.instrument.color }}>{selectedPart.instrument.family}</span></div>
               <label>Instrument<output>{selectedPart.name}</output></label>
-              <label>Clef<output>{selectedPart.staves[0].clef}</output></label>
+              {selectedPart.staves.length > 1 ? (
+                <div className="mixer-buttons" role="group" aria-label={`${selectedPart.name} staff selection`}>
+                  {selectedPart.staves.map((staff, staffIndex) => (
+                    <button
+                      key={staff.id}
+                      className={staff.id === selectedStaff?.id ? "active" : ""}
+                      onClick={() => selectStaff(staff.id)}
+                      aria-label={`Select staff ${staffIndex + 1}, ${staff.clef} clef`}
+                      aria-pressed={staff.id === selectedStaff?.id}
+                    >Staff {staffIndex + 1} · {staff.clef}</button>
+                  ))}
+                </div>
+              ) : null}
+              <label>Clef<output aria-label={`Selected staff clef: ${selectedStaff?.clef ?? selectedPart.instrument.clef}`}>{selectedStaff?.clef ?? selectedPart.instrument.clef}</output></label>
               <label>Written key<output aria-label={`${selectedPart.name} written key`}>{keySignatureName(selectedWrittenKey)}</output></label>
               <label>Written C sounds<output>{selectedPart.instrument.transposition.chromatic + selectedPart.instrument.transposition.octaveChange * 12 > 0 ? "+" : ""}{selectedPart.instrument.transposition.chromatic + selectedPart.instrument.transposition.octaveChange * 12} st</output></label>
               <div className="mixer-buttons"><button className={selectedPart.muted ? "active" : ""} onClick={() => commit(updatePart(score, selectedPart.id, { muted: !selectedPart.muted }), selectedPart.muted ? "Unmuted part" : "Muted part")}><Volume2 size={13} /> Mute</button><button className={selectedPart.solo ? "active" : ""} onClick={() => commit(updatePart(score, selectedPart.id, { solo: !selectedPart.solo }), selectedPart.solo ? "Unsoloed part" : "Soloed part")}>S Solo</button></div>
-              <button className="danger-link" onClick={() => { const next = removeInstrument(score, selectedPart.id); setSelectedPartId(next.parts[0]?.id ?? ""); commit(next, `Removed ${selectedPart.name}`); }} disabled={score.parts.length <= 1}><Trash2 size={13} /> Remove part</button>
+              <button className="danger-link" onClick={() => { const next = removeInstrument(score, selectedPart.id); const selection = safeSelection(next); setSelectedPartId(selection.partId); setSelectedStaffId(selection.staffId); commit(next, `Removed ${selectedPart.name}`); }} disabled={score.parts.length <= 1}><Trash2 size={13} /> Remove part</button>
             </div>
           ) : null}
           <div className="shortcut-card"><span>QUICK INPUT</span><p><kbd>1–5</kbd> duration <kbd>.</kbd> dotted</p><p><kbd>A–G</kbd> pitch <kbd>R</kbd> rest</p><p><kbd>T</kbd> tie <kbd>⌫</kbd> delete</p><p><kbd>↑ ↓</kbd> octave <kbd>Space</kbd> play</p><button onClick={() => setHelpOpen(true)}>View all shortcuts <ChevronDown size={12} /></button></div>
@@ -570,7 +629,7 @@ export function NotationStudio() {
           <section className="modal instrument-modal" role="dialog" aria-modal="true" aria-labelledby="add-instrument-title"><header><div><span className="eyebrow">ORCHESTRA LIBRARY</span><h2 id="add-instrument-title">Add an instrument</h2><p>{INSTRUMENTS.length} standard orchestral, keyboard, and vocal definitions.</p></div><button className="icon-button" onClick={() => setAddOpen(false)} aria-label="Close"><X size={18} /></button></header>
             <div className="instrument-search"><Search size={16} /><input value={instrumentQuery} onChange={(event) => setInstrumentQuery(event.target.value)} placeholder="Search flute, B♭ clarinet, violin…" aria-label="Search instruments" /></div>
             <div className="family-tabs">{["All", "Woodwinds", "Brass", "Percussion", "Keyboards", "Voices", "Strings"].map((family) => <button key={family} className={activeFamily === family ? "active" : ""} onClick={() => setActiveFamily(family)}>{family}</button>)}</div>
-            <div className="catalog-list">{filteredInstruments.map((instrument) => <button key={instrument.catalogId} onClick={() => { const next = addInstrument(score, instrument.catalogId); commit(next, `Added ${instrument.name}`); setSelectedPartId(next.parts.at(-1)!.id); setAddOpen(false); }}><span className="catalog-color" style={{ background: instrument.color }} /><span><strong>{instrument.name}</strong><small>{instrument.family} · {instrument.clef} clef{instrument.transposition.chromatic || instrument.transposition.octaveChange ? ` · ${instrument.transposition.chromatic + instrument.transposition.octaveChange * 12} semitones` : ""}</small></span><Plus size={15} /></button>)}</div>
+            <div className="catalog-list">{filteredInstruments.map((instrument) => <button key={instrument.catalogId} onClick={() => { const next = addInstrument(score, instrument.catalogId); const selection = safeSelection(next, next.parts.at(-1)?.id); commit(next, `Added ${instrument.name}`); setSelectedPartId(selection.partId); setSelectedStaffId(selection.staffId); setAddOpen(false); }}><span className="catalog-color" style={{ background: instrument.color }} /><span><strong>{instrument.name}</strong><small>{instrument.family} · {instrument.staffClefs?.join(" + ") ?? instrument.clef} {instrument.staffClefs ? "staves" : "clef"}{instrument.transposition.chromatic || instrument.transposition.octaveChange ? ` · ${instrument.transposition.chromatic + instrument.transposition.octaveChange * 12} semitones` : ""}</small></span><Plus size={15} /></button>)}</div>
           </section>
         </div>
       ) : null}

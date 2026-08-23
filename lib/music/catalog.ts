@@ -2,6 +2,8 @@ import type { Clef, InstrumentSnapshot, Transposition } from "./model";
 
 export interface InstrumentDefinition extends InstrumentSnapshot {
   keywords: string[];
+  /** Staff layout used when a new part is created; absent definitions use the primary clef. */
+  staffClefs?: readonly Clef[];
 }
 
 const T = (diatonic = 0, chromatic = 0, octaveChange = 0): Transposition => ({ diatonic, chromatic, octaveChange });
@@ -15,7 +17,22 @@ const make = (
   midiProgram: number,
   transposition = T(),
   keywords: string[] = [],
-): InstrumentDefinition => ({ catalogId, family, name, shortName, clef, midiProgram, transposition, keywords, color: FAMILY_COLORS[family] ?? "#7c827e" });
+  staffClefs?: readonly Clef[],
+): InstrumentDefinition => ({
+  catalogId,
+  family,
+  name,
+  shortName,
+  clef,
+  midiProgram,
+  transposition,
+  keywords,
+  color: FAMILY_COLORS[family] ?? "#7c827e",
+  ...(staffClefs?.length ? { staffClefs: [...staffClefs] } : {}),
+});
+
+const GRAND_STAFF = ["treble", "bass"] as const satisfies readonly Clef[];
+const ORGAN_STAVES = ["treble", "bass", "bass"] as const satisfies readonly Clef[];
 
 export const FAMILY_COLORS: Record<string, string> = {
   Woodwinds: "#4c9a8b",
@@ -31,9 +48,8 @@ export const FAMILY_COLORS: Record<string, string> = {
  * `diatonic` describe the keyed interval; `octaveChange` keeps octave-
  * transposing conventions explicit instead of folding them into chromatic.
  *
- * The current score constructor creates one staff from the primary `clef`.
- * Piano, harp, organ, marimba, choir, and similar entries below therefore do
- * not claim that their eventual grand-staff or multi-staff layout exists yet.
+ * `clef` remains the primary clef stored in instrument snapshots for backward
+ * compatibility. New multi-staff parts use the optional `staffClefs` layout.
  * Where established brass-band and orchestral notation conventions differ,
  * the catalog exposes separate, explicitly named presets.
  */
@@ -153,17 +169,17 @@ export const INSTRUMENTS: InstrumentDefinition[] = [
   make("drum-set", "Percussion", "Drum Set", "Dr. Set", "percussion", 0, T(), ["drum kit"]),
   make("percussion", "Percussion", "Percussion", "Perc.", "percussion", 0),
 
-  // Keyboards. `clef` is the primary single-staff preview clef for now.
-  make("piano", "Keyboards", "Piano", "Pno.", "treble", 0),
-  make("celesta", "Keyboards", "Celesta", "Cel.", "treble", 8, T(0, 0, 1)),
-  make("harpsichord", "Keyboards", "Harpsichord", "Hpsd.", "treble", 6),
-  make("organ", "Keyboards", "Organ", "Org.", "treble", 19),
+  // Keyboards. `clef` remains the primary preview clef for saved snapshots.
+  make("piano", "Keyboards", "Piano", "Pno.", "treble", 0, T(), [], GRAND_STAFF),
+  make("celesta", "Keyboards", "Celesta", "Cel.", "treble", 8, T(0, 0, 1), [], GRAND_STAFF),
+  make("harpsichord", "Keyboards", "Harpsichord", "Hpsd.", "treble", 6, T(), [], GRAND_STAFF),
+  make("organ", "Keyboards", "Organ", "Org.", "treble", 19, T(), [], ORGAN_STAVES),
   make("electric-piano-1", "Keyboards", "Electric Piano 1", "E. Pno. 1", "treble", 4),
   make("electric-piano-2", "Keyboards", "Electric Piano 2", "E. Pno. 2", "treble", 5),
   make("clavinet", "Keyboards", "Clavinet", "Clav.", "treble", 7),
-  make("accordion", "Keyboards", "Accordion", "Acc.", "treble", 21),
-  make("harmonium", "Keyboards", "Harmonium", "Harm.", "treble", 20, T(), ["reed organ"]),
-  make("bandoneon", "Keyboards", "Bandoneon", "Band.", "treble", 23),
+  make("accordion", "Keyboards", "Accordion", "Acc.", "treble", 21, T(), [], GRAND_STAFF),
+  make("harmonium", "Keyboards", "Harmonium", "Harm.", "treble", 20, T(), ["reed organ"], GRAND_STAFF),
+  make("bandoneon", "Keyboards", "Bandoneon", "Band.", "treble", 23, T(), [], GRAND_STAFF),
 
   // Voices. Choir presets are explicitly single-staff until staff groups land.
   make("soprano", "Voices", "Soprano", "S.", "treble", 52),
@@ -188,7 +204,7 @@ export const INSTRUMENTS: InstrumentDefinition[] = [
   make("viola", "Strings", "Viola", "Vla.", "alto", 41),
   make("cello", "Strings", "Violoncello", "Vc.", "bass", 42, T(), ["cello"]),
   make("double-bass", "Strings", "Double Bass", "Cb.", "bass", 43, T(0, 0, -1), ["contrabass"]),
-  make("harp", "Strings", "Harp", "Hp.", "treble", 46),
+  make("harp", "Strings", "Harp", "Hp.", "treble", 46, T(), [], GRAND_STAFF),
   make("guitar", "Strings", "Classical Guitar", "Gtr.", "treble", 24, T(0, 0, -1), ["nylon guitar"]),
   make("acoustic-guitar-steel", "Strings", "Acoustic Steel Guitar", "A. Gtr.", "treble", 25, T(0, 0, -1)),
   make("electric-guitar-clean", "Strings", "Electric Guitar (clean)", "E. Gtr.", "treble", 27, T(0, 0, -1)),
