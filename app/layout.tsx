@@ -23,7 +23,7 @@ export const metadata: Metadata = {
     description: "Compose polished solo, ensemble, and orchestral scores in your browser.",
     url: "/",
     siteName: "Garak Studio",
-    images: [{ url: "/og.png", width: 1731, height: 909, alt: "Garak — Compose beautifully. Think orchestrally." }],
+    images: [{ url: "/og.png", width: 1200, height: 630, alt: "Garak — Compose beautifully. Think orchestrally." }],
   },
   twitter: {
     card: "summary_large_image",

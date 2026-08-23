@@ -8,7 +8,7 @@
 
 - 의미 기반 Score → Part → Staff → Measure → Voice → Event 모델
 - versioned native format과 instrument snapshot
-- 정수 tick 음가, 4/4 마디 용량 검증, overflow 없는 자동 마디 진행
+- 정수 tick 음가, 악보 단위 4/4·3/4·6/8 마디 용량 검증, overflow 없는 자동 마디 진행
 - written/sounding pitch와 Piccolo, B♭ Clarinet, F Horn, Bass Clarinet, Double Bass, Glockenspiel 변환 테스트
 - 48개 이상 악기 catalog와 4개 편성 template
 - VexFlow 5 SVG 총보/파트 사보 및 다중 system
@@ -25,7 +25,7 @@
 
 - Staff당 편집 Voice 1개
 - NoteEvent당 pitch 1개
-- 문서 전역 4/4, C major
+- 악보 전체에 하나의 박자(4/4·3/4·6/8)와 C major 조표만 적용
 - 한 점음표
 - grand staff catalog는 있으나 실제 다중 staff 편집 없음
 - percussion catalog는 있으나 note map editor 없음
@@ -40,7 +40,7 @@
 
 ### 음악 코어
 
-- Rational duration/onset과 pickup
+- Rational duration/onset, compound meter 세부 모델과 pickup
 - 중간 time/key/clef/tempo 변경
 - chords, Staff당 4 voices
 - double dots, 32nd/64th

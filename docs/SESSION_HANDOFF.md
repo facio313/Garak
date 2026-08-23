@@ -42,10 +42,10 @@
 - keyboard map을 CommandId adapter로 분리
 - undo branch, invalid no-op, original ID restoration tests
 
-### B. Rational time과 meter/key UI
+### B. Rational time과 meter/key 확장
 
 - duration/onset을 Rational로 승격
-- 3/4, 6/8, pickup
+- compound meter의 beat grouping, pickup, 마디 중간 meter change
 - staff별 written key/clef attributes
 - concert key → transposing part written key projection
 - G major accidental-state fixture

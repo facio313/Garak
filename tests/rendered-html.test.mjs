@@ -39,8 +39,8 @@ test("ships product metadata and removes the disposable starter", async () => {
   assert.match(packageJson, /"lucide-react"/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
   assert.deepEqual([...og.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
-  assert.equal(og.readUInt32BE(16), 1731);
-  assert.equal(og.readUInt32BE(20), 909);
+  assert.equal(og.readUInt32BE(16), 1200);
+  assert.equal(og.readUInt32BE(20), 630);
   await assert.rejects(access(new URL("../app/_sites-preview/SkeletonPreview.tsx", import.meta.url)));
   await assert.rejects(access(new URL("../app/_sites-preview/preview.css", import.meta.url)));
 });

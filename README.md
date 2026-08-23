@@ -9,6 +9,7 @@ Garak은 브라우저에서 솔로, 앙상블, 오케스트라 악보를 빠르�
 - treble, alto, bass, percussion clef를 VexFlow 5 SVG로 사보
 - 온음표, 2분음표, 4분음표, 8분음표, 16분음표와 한 점음표 입력
 - 음표·쉼표·샵·플랫·내추럴 및 동일음 붙임줄 입력
+- 악보 단위 4/4, 3/4, 6/8 박자 선택과 정확한 마디 용량 검증
 - 마디 용량을 넘기지 않고 다음 마디로 자동 진행
 - 키보드와 화면 툴바를 병행한 빠른 입력
 - 최대 100단계 snapshot undo/redo
@@ -95,7 +96,7 @@ docs/SESSION_HANDOFF.md  다음 작업자가 즉시 이어갈 체크리스트
 
 ## 현재 알파의 명확한 경계
 
-현재 UI는 Staff당 Voice 1개와 NoteEvent당 음 하나를 편집합니다. 피아노·하프의 grand staff, 화음, 다성부, 자동 빔, tuplet, grace note, articulation, dynamics, lyrics, percussion map editor, MusicXML import, 전문 페이지 나눔, 고품질 오케스트라 음원, 클라우드 협업은 아직 지원하지 않습니다. 구현되지 않은 기능을 작동하는 것처럼 표시하지 않습니다.
+현재 UI는 Staff당 Voice 1개와 NoteEvent당 음 하나를 편집하며, 박자와 C major 조표는 악보 전체에 적용합니다. 피아노·하프의 grand staff, 화음, 다성부, 자동 빔, tuplet, grace note, articulation, dynamics, lyrics, percussion map editor, MusicXML import, 전문 페이지 나눔, 고품질 오케스트라 음원, 클라우드 협업은 아직 지원하지 않습니다. 구현되지 않은 기능을 작동하는 것처럼 표시하지 않습니다.
 
 전체 제품 설계와 단계별 완료 기준은 [아키텍처](docs/ARCHITECTURE.md)와 [로드맵](docs/ROADMAP.md)을 참고하세요.
 
