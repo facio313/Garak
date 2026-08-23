@@ -186,6 +186,7 @@ export function NotationStudio() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [inspectorDrawerMode, setInspectorDrawerMode] = useState(false);
   const [instrumentsOpen, setInstrumentsOpen] = useState(false);
   const [pendingImport, setPendingImport] = useState<PendingImport | null>(null);
   const [instrumentQuery, setInstrumentQuery] = useState("");
@@ -200,6 +201,14 @@ export function NotationStudio() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const playbackTimerRef = useRef<number | null>(null);
   const saveTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const query = window.matchMedia("(max-width: 1180px)");
+    const syncMode = () => setInspectorDrawerMode(query.matches);
+    syncMode();
+    query.addEventListener("change", syncMode);
+    return () => query.removeEventListener("change", syncMode);
+  }, []);
 
   const cancelPendingImport = useCallback(() => {
     setPendingImport(null);
@@ -815,8 +824,8 @@ export function NotationStudio() {
             } else document.getElementById("score-title")?.focus();
           }}
           aria-label="Edit score details"
-          aria-controls="score-inspector"
-          aria-expanded={inspectorOpen}
+          aria-controls={inspectorDrawerMode ? "score-inspector" : undefined}
+          aria-expanded={inspectorDrawerMode ? inspectorOpen : undefined}
         >
           <span className="eyebrow">{viewMode === "score" ? "FULL SCORE" : "LINKED PART"}</span>
           <strong>{score.metadata.title}</strong>

@@ -127,7 +127,8 @@ test("ships product metadata and removes the disposable starter", async () => {
   assert.ok(studio.includes("setPendingImport({ score: parsed, warnings: imported.warnings })"), "lossy MusicXML imports must remain staged");
   assert.ok(studio.includes("Cancel import"));
   assert.ok(studio.includes("Open editable copy"));
-  assert.ok(studio.includes('aria-controls="score-inspector"'));
+  assert.ok(studio.includes('aria-controls={inspectorDrawerMode ? "score-inspector" : undefined}'), "desktop must not announce its always-visible inspector as collapsed");
+  assert.ok(studio.includes("query.addEventListener(\"change\", syncMode)"), "compact inspector semantics must follow viewport changes");
   assert.ok(studio.includes('aria-controls="instrument-drawer"'));
   assert.ok(studio.includes('role="group" aria-label="Export options"'));
   assert.ok(studio.includes('tabIndex={-1} aria-hidden="true"'), "the programmatic file input must not create a duplicate tab stop");
