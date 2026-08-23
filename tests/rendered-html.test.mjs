@@ -87,7 +87,7 @@ test("ships product metadata and removes the disposable starter", async () => {
   assert.ok(studio.includes("selectedStaffId={selectedStaff?.id}"));
   assert.ok(studio.includes("addChordTone(score, part.id, note, staffId)"));
   assert.ok(studio.includes("removeLastChordTone(score, part.id, staffId)"));
-  assert.ok(studio.includes('`Removed ${pitchName(result.removedNote.pitch)} · Chord · ${result.remainingNoteCount} notes`'));
+  assert.ok(studio.includes('`Removed ${pitchName(result.removedNote.pitch)} · Chord · ${countLabel(result.remainingNoteCount, "note")}`'));
   assert.ok(studio.includes("if (chordMode) removeChordTone()"));
   assert.ok(studio.includes('trimHistorySnapshots(proposedHistory, "end")'), "undo snapshots must honor the byte and entry budget");
   assert.ok(studio.includes('trimHistorySnapshots([score, ...items], "start")'), "redo snapshots must honor the byte and entry budget");
@@ -103,7 +103,12 @@ test("ships product metadata and removes the disposable starter", async () => {
   assert.ok(studio.includes("Math.min(.018, item.durationSeconds * .35)"), "live playback attack must fit short 32nd/64th note gates");
   assert.ok(studio.includes("Math.round(tempo || 96)"), "the UI must preserve the integer tempo contract used by MusicXML");
   assert.ok(studio.includes("selectPlaybackWindow(collectPlaybackNotes(score), 600)"), "large-score playback must choose a chronological cross-part window");
-  assert.ok(studio.includes("Playing the first ${notes.length} of ${playbackWindow.total} notes"), "playback truncation must be explicit");
+  assert.ok(studio.includes('Playing the first ${notes.length} of ${countLabel(playbackWindow.total, "note")}'), "playback truncation must be explicit and grammatical");
+  assert.ok(studio.includes('Playing ${countLabel(notes.length, "note")}'), "single-note playback status must use the singular noun");
+  assert.ok(studio.includes('countLabel(score.parts.length, "PART", "PARTS")'), "the instrument count must use singular and plural labels");
+  assert.ok(studio.includes('countLabel(score.measureOrder.length, "measure")'), "the measure count must use singular and plural labels");
+  assert.ok(renderer.includes('countLabel(score.parts.length, "part")'), "the accessible score label must pluralize part counts");
+  assert.ok(renderer.includes('countLabel(score.measureOrder.length, "measure")'), "the accessible score label must pluralize measure counts");
   assert.ok(studio.includes("else if (selectedPart && activeStaffId) commit(removeLastEvent(score, selectedPart.id, activeStaffId)"));
   const removalCallback = studio.match(/const removeChordTone = useCallback\(\(\) => \{([\s\S]*?)\n {2}\}, \[commit, score, selectedPartId, selectedStaffId\]\);/)?.[1];
   assert.ok(removalCallback, "the chord-tone removal UI must have one shared callback");
@@ -111,6 +116,8 @@ test("ships product metadata and removes the disposable starter", async () => {
   assert.ok(studio.includes("const targetMeasureId = findLastEventMeasureId(score, part.id, staffIndex)"));
   assert.ok(studio.includes("writtenKeyForPart(score.measures[targetMeasureId].key, part)"));
   assert.ok(studio.includes("importMusicXML(contents)"));
+  assert.ok(studio.includes('await import("../lib/music/importers")'), "the MusicXML parser must load only when an XML file is selected");
+  assert.doesNotMatch(studio, /^import \{ importMusicXML \} from/m, "the initial studio chunk must not statically include the MusicXML parser");
   assert.ok(studio.includes("Cancel MusicXML import"));
   assert.ok(studio.includes("siblings.forEach((element) => { element.inert = true; })"), "modal background controls must become inert");
   assert.ok(studio.includes('document.addEventListener("keydown", handleDialogKey)'), "dialogs must trap Tab and handle Escape");
@@ -169,7 +176,7 @@ test("ships product metadata and removes the disposable starter", async () => {
   assert.ok(renderer.includes("}, 120)"), "resize re-engraving must use the bounded debounce interval");
   assert.ok(renderer.includes("window.clearTimeout(resizeTimer)"), "resize debounce timers must be replaced and cleaned up");
   assert.ok(renderer.includes("onKeyDown={handleRowKeyDown}"), "the score surface must expose keyboard staff-row navigation");
-  assert.ok(renderer.includes("Use Up and Down Arrow to select a staff"), "the bounded score label must explain keyboard staff selection");
+  assert.ok(renderer.includes("Use the Up and Down Arrow keys to select a staff"), "the bounded score label must explain keyboard staff selection");
   assert.doesNotMatch(renderer, /measureOrder\.indexOf\(/, "system layout must not scan the full measure order once per measure");
   assert.match(renderer, /dotIndex < event\.duration\.dots/);
   assert.ok(renderer.includes("if (atSystemStart || keyChanged)"), "key signatures render at system starts and actual change boundaries");

@@ -250,6 +250,39 @@ test("MusicXML import discloses implicit and non-final underfilled measures befo
   assert.deepEqual(validateScore(imported.score), []);
 });
 
+test("MusicXML loss warnings use grammatical dot and single-tick labels", () => {
+  const xml = `<score-partwise version="4.0">
+    <part-list>
+      <score-part id="P1"><part-name>Warning grammar</part-name></score-part>
+      <score-part id="P2"><part-name>Second part</part-name></score-part>
+    </part-list>
+    <part id="P1">
+      <measure number="1" implicit="yes">
+        <attributes><divisions>960</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+        <note><pitch><step>C</step><octave>4</octave></pitch><duration>960</duration><voice>1</voice><type>quarter</type><dot/></note>
+        <forward><duration>2879</duration></forward>
+      </measure>
+      <measure number="2"><note><rest/><duration>3840</duration><voice>1</voice><type>whole</type></note></measure>
+    </part>
+    <part id="P2">
+      <measure number="1" implicit="yes">
+        <attributes><divisions>960</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+        <note><pitch><step>E</step><octave>4</octave></pitch><duration>960</duration><voice>1</voice><type>quarter</type></note>
+        <forward><duration>2879</duration></forward>
+      </measure>
+      <measure number="2"><note><rest/><duration>3840</duration><voice>1</voice><type>whole</type></note></measure>
+    </part>
+  </score-partwise>`;
+
+  const imported = importMusicXML(xml);
+  const report = imported.warnings.join("\n");
+  assert.match(report, /notated quarter with a dot differs from duration\/divisions/i);
+  assert.match(report, /following measure starts 1 tick later/i);
+  assert.match(report, /Warning grammar, Second part mark the source measure implicit/i);
+  assert.doesNotMatch(report, /with dots|1 ticks later/i);
+  assert.deepEqual(validateScore(imported.score), []);
+});
+
 test("MusicXML import reports key and meter declarations normalized from after musical content", () => {
   const xml = `<score-partwise version="4.0">
     <part-list><score-part id="P1"><part-name>Late attributes</part-name></score-part></part-list>

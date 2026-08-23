@@ -1369,6 +1369,93 @@ test("MusicXML merges articulation and tie data in one notations element", () =>
   assert.doesNotMatch(xml, /<\/notations>\s*<notations>/, "a note never receives sibling notations containers");
 });
 
+test("tie-chain playback and MIDI intentionally use only the root articulation and velocity", () => {
+  const tiedQuarterChain = (staccatoIndex: number | null = null) => {
+    const score = createScore("solo", { seedDemo: false });
+    score.tempo = 60;
+    const voice = getPrimaryVoice(score.parts[0], score.measureOrder[0]);
+    const noteEvent = (index: number) => {
+      const event = makeEvent({
+        id: `rooted-tie-event-${index}`,
+        pitch: { step: "C", alter: 0, octave: 4 },
+        duration: { base: 4, dots: 0 },
+        rest: false,
+      });
+      if (event.kind !== "note") throw new Error("Expected a tied note event.");
+      return event;
+    };
+    const events = [noteEvent(1), noteEvent(2), noteEvent(3)];
+    if (staccatoIndex !== null) events[staccatoIndex].articulation = "staccato";
+    voice.events.push(...events);
+    score.ties.push(
+      { id: "rooted-tie-1-2", fromNoteId: events[0].notes[0].id, toNoteId: events[1].notes[0].id },
+      { id: "rooted-tie-2-3", fromNoteId: events[1].notes[0].id, toNoteId: events[2].notes[0].id },
+    );
+    assert.deepEqual(validateScore(score), []);
+    return { score, events };
+  };
+  const countBytes = (bytes: readonly number[], needle: readonly number[]): number =>
+    bytes.reduce((count, _byte, index) => count + (needle.every((value, offset) => bytes[index + offset] === value) ? 1 : 0), 0);
+  const assertMidiGate = (score: ScoreDocument, deltaTicks: number) => {
+    const midi = [...scoreToMidi(score)];
+    const noteOff = [...encodeMidiVariableLength(deltaTicks), 0x80, 60, 0];
+    assert.equal(countBytes(midi, noteOff), 1, `the merged C4 note-off must occur after ${deltaTicks} MIDI ticks`);
+  };
+
+  const normal = tiedQuarterChain();
+  const rootStaccato = tiedQuarterChain(0);
+  const middleStaccato = tiedQuarterChain(1);
+  const lastStaccato = tiedQuarterChain(2);
+  const normalPlayback = collectPlaybackNotes(normal.score);
+  const rootPlayback = collectPlaybackNotes(rootStaccato.score);
+  const middlePlayback = collectPlaybackNotes(middleStaccato.score);
+  const lastPlayback = collectPlaybackNotes(lastStaccato.score);
+  assert.equal(normalPlayback.length, 1, "three tied notes become one performed attack");
+  assert.equal(normalPlayback[0].durationSeconds, 2.7);
+  assert.equal(rootPlayback[0].durationSeconds, 1.35, "root staccato halves the merged chain before the common 90% live gate");
+  assert.equal(middlePlayback[0].durationSeconds, normalPlayback[0].durationSeconds, "middle-destination staccato is visual/XML metadata only");
+  assert.equal(lastPlayback[0].durationSeconds, normalPlayback[0].durationSeconds, "terminal-destination staccato is visual/XML metadata only");
+
+  assertMidiGate(normal.score, 1_440);
+  assertMidiGate(rootStaccato.score, 720);
+  assertMidiGate(middleStaccato.score, 1_440);
+  assertMidiGate(lastStaccato.score, 1_440);
+
+  [rootStaccato, middleStaccato, lastStaccato].forEach(({ score, events }, markedIndex) => {
+    const xml = scoreToMusicXML(score);
+    const pitchedNotes = [...xml.matchAll(/<note>([\s\S]*?)<\/note>/g)]
+      .map((match) => match[0])
+      .filter((note) => note.includes("<pitch>"))
+      .slice(0, 3);
+    assert.equal(pitchedNotes.length, 3);
+    pitchedNotes.forEach((note, noteIndex) => {
+      assert.equal(note.includes("<staccato/>"), noteIndex === markedIndex, "MusicXML preserves the destination mark at its source note");
+    });
+    events.forEach((event, eventIndex) => {
+      assert.equal(event.articulation, eventIndex === markedIndex ? "staccato" : undefined, "performance/export must not mutate SVG-facing score data");
+    });
+  });
+
+  const rootedPriority = tiedQuarterChain();
+  rootedPriority.events[0].dynamic = "p";
+  rootedPriority.events[0].articulation = "accent";
+  rootedPriority.events[1].dynamic = "fff";
+  rootedPriority.events[1].articulation = "staccato";
+  rootedPriority.events[2].articulation = "marcato";
+  const priorityPlayback = collectPlaybackNotes(rootedPriority.score);
+  const expectedRootVelocity = DYNAMIC_VELOCITIES.p + ARTICULATION_VELOCITY_BONUSES.accent;
+  assert.equal(priorityPlayback.length, 1);
+  assert.equal(priorityPlayback[0].velocity, expectedRootVelocity, "a later tied destination cannot replace the one real attack velocity");
+  assert.equal(priorityPlayback[0].durationSeconds, normalPlayback[0].durationSeconds, "a later tied staccato cannot replace the root accent gate policy");
+  const priorityMidi = [...scoreToMidi(rootedPriority.score)];
+  assert.equal(countBytes(priorityMidi, [0x90, 60, expectedRootVelocity]), 1);
+  assertMidiGate(rootedPriority.score, 1_440);
+  const priorityXml = scoreToMusicXML(rootedPriority.score);
+  assert.equal((priorityXml.match(/<accent\/>/g) ?? []).length, 1);
+  assert.equal((priorityXml.match(/<staccato\/>/g) ?? []).length, 1);
+  assert.equal((priorityXml.match(/<strong-accent type="up"\/>/g) ?? []).length, 1);
+});
+
 test("dynamic marks propagate independently per staff through playback, MIDI velocity, and MusicXML directions", () => {
   assert.deepEqual(DYNAMIC_MARKINGS, ["ppp", "pp", "p", "mp", "mf", "f", "ff", "fff"]);
   assert.equal(DEFAULT_MIDI_VELOCITY, DYNAMIC_VELOCITIES.mf);

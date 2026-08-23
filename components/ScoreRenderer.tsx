@@ -48,6 +48,10 @@ const VEXFLOW_ARTICULATION_CODES = {
   marcato: "a^",
 } as const;
 
+function countLabel(count: number, singular: string): string {
+  return `${count} ${count === 1 ? singular : `${singular}s`}`;
+}
+
 function vexKey(event: MusicEvent, clef: string): string[] {
   if (event.kind === "rest") return [clef === "bass" ? "d/3" : clef === "alto" || clef === "tenor" ? "c/4" : "b/4"];
   return event.notes.map((note) => {
@@ -414,7 +418,7 @@ export function ScoreRenderer({ score, selectedPartId, viewMode, zoom, onSelectP
     onSelectStaff?.(next.staff.id);
   };
   const scoreControlLabel = keyboardRow
-    ? `${score.metadata.title}. ${score.parts.length} parts, ${score.measureOrder.length} measures. Selected ${keyboardRow.part.name}, staff ${keyboardRow.staffIndex + 1}, ${keyboardRow.staff.clef} clef. Use Up and Down Arrow to select a staff; use A through G to enter notes.`
+    ? `${score.metadata.title}. ${countLabel(score.parts.length, "part")}, ${countLabel(score.measureOrder.length, "measure")}. Selected ${keyboardRow.part.name}, staff ${keyboardRow.staffIndex + 1}, ${keyboardRow.staff.clef} clef. Use the Up and Down Arrow keys to select a staff; use A through G to enter notes.`
     : `${score.metadata.title}. No editable staff rows.`;
 
   return (

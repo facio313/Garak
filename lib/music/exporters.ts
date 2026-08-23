@@ -322,6 +322,10 @@ function collectTimedNotes(score: ScoreDocument): TimedNote[] {
       tail = next;
     }
   });
+  // A tie chain has one attack in schema v1. Its root note therefore owns the
+  // performed velocity and articulation gate. Articulations on tied
+  // destinations remain in the score for SVG/MusicXML fidelity, but are not
+  // aggregated backward into the already-started performance event.
   return notes.filter((note) => !merged.has(note.noteId)).map((note) => note.articulation === "staccato"
     ? { ...note, durationTicks: Math.max(1, Math.round(note.durationTicks * STACCATO_GATE_RATIO)) }
     : note);

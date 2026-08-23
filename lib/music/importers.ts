@@ -323,7 +323,8 @@ function noteDuration(noteNode: XmlNode, importedTicks: number, warnings: Warnin
   }
 
   if (notated && Math.abs(durationTicks(notated) - importedTicks) >= TICK_EPSILON) {
-    warnings.push(`${context}: the notated ${type}${dotCount ? " with dots" : ""} differs from duration/divisions; the sounding duration was preserved.`);
+    const dotLabel = dotCount === 1 ? " with a dot" : dotCount > 1 ? ` with ${dotCount} dots` : "";
+    warnings.push(`${context}: the notated ${type}${dotLabel} differs from duration/divisions; the sounding duration was preserved.`);
   } else if ((type && !typedBase) || dotCount > 2) {
     warnings.push(`${context}: unsupported graphic note type or dot count was normalized to the exact duration/divisions value.`);
   }
@@ -819,7 +820,7 @@ export function importMusicXML(xml: string): MusicXMLImportResult {
       return measureNode && attribute(measureNode, "implicit")?.toLowerCase() === "yes" ? [sourcePartNames[partIndex]] : [];
     });
     if (implicitParts.length) {
-      warnings.push(`Measure ${measureIndex + 1}: ${implicitParts.join(", ")} marks the source measure implicit; Garak cannot preserve pickup/implicit measure metadata and will export it as an explicit measure.`);
+      warnings.push(`Measure ${measureIndex + 1}: ${implicitParts.join(", ")} ${implicitParts.length === 1 ? "marks" : "mark"} the source measure implicit; Garak cannot preserve pickup/implicit measure metadata and will export it as an explicit measure.`);
     }
     if (measureIndex === measureCount - 1) continue;
     const extents = sourceMeasureExtents.flatMap((partExtents) => {
@@ -830,7 +831,7 @@ export function importMusicXML(xml: string): MusicXMLImportResult {
     const capacity = measureCapacity(measures[measureOrder[measureIndex]]);
     if (sourceExtent < capacity - TICK_EPSILON) {
       const delay = capacity - sourceExtent;
-      warnings.push(`Measure ${measureIndex + 1}: the source measure is underfilled at ${warningTickValue(sourceExtent)} of ${warningTickValue(capacity)} ticks; Garak uses the full active meter, so the following measure starts ${warningTickValue(delay)} ticks later than the source content ends.`);
+      warnings.push(`Measure ${measureIndex + 1}: the source measure is underfilled at ${warningTickValue(sourceExtent)} of ${warningTickValue(capacity)} ticks; Garak uses the full active meter, so the following measure starts ${warningTickValue(delay)} ${Math.abs(delay - 1) < TICK_EPSILON ? "tick" : "ticks"} later than the source content ends.`);
     }
   }
 

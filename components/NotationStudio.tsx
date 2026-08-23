@@ -28,7 +28,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { INSTRUMENTS, SCORE_TEMPLATES } from "../lib/music/catalog";
 import { collectPlaybackNotes, scoreToMidi, scoreToMusicXML, selectPlaybackWindow } from "../lib/music/exporters";
 import { trimHistorySnapshots } from "../lib/music/history";
-import { importMusicXML } from "../lib/music/importers";
 import { KEY_SIGNATURES, keySignatureAlterForStep, keySignatureName, writtenKeyForPart } from "../lib/music/key-signatures";
 import type { KeySignature } from "../lib/music/key-signatures";
 import type { Articulation, DurationBase, DurationValue, DynamicMarking, MusicEvent, PitchStep, ScoreDocument, ScoreNote } from "../lib/music/model";
@@ -55,6 +54,10 @@ const METER_PRESETS = ["2/4", "3/4", "4/4", "5/8", "6/8", "7/8", "9/8", "12/8"] 
 
 function keyValue(key: KeySignature): string {
   return `${key.fifths}:${key.mode}`;
+}
+
+function countLabel(count: number, singular: string, plural = `${singular}s`): string {
+  return `${count} ${count === 1 ? singular : plural}`;
 }
 
 function inputAlter(mode: AccidentalMode, writtenKey: KeySignature, step: PitchStep): -1 | 0 | 1 {
@@ -443,8 +446,8 @@ export function NotationStudio() {
     audioContextRef.current = context;
     setPlaying(true);
     setStatus(playbackWindow.truncated
-      ? `Playing the first ${notes.length} of ${playbackWindow.total} notes at ♩ = ${score.tempo}`
-      : `Playing ${notes.length} notes at ♩ = ${score.tempo}`);
+      ? `Playing the first ${notes.length} of ${countLabel(playbackWindow.total, "note")} at ♩ = ${score.tempo}`
+      : `Playing ${countLabel(notes.length, "note")} at ♩ = ${score.tempo}`);
     const startedAt = performance.now();
     playbackTimerRef.current = window.setInterval(() => {
       const elapsed = (performance.now() - startedAt) / 1000;
@@ -484,7 +487,7 @@ export function NotationStudio() {
       const updatedStaffIndex = resolveStaffIndex(updatedPart, staffId);
       const updatedEvent = getPrimaryVoice(updatedPart, result.measureId, updatedStaffIndex).events.find((event) => event.id === result.eventId);
       const noteCount = updatedEvent?.kind === "note" ? updatedEvent.notes.length : 1;
-      commit(result.score, `Added ${pitchName(note.pitch)} · Chord · ${noteCount} notes · staff ${staffNumber}`);
+      commit(result.score, `Added ${pitchName(note.pitch)} · Chord · ${countLabel(noteCount, "note")} · staff ${staffNumber}`);
       return;
     }
 
@@ -534,7 +537,7 @@ export function NotationStudio() {
       setStatus(result.error);
       return;
     }
-    commit(result.score, `Removed ${pitchName(result.removedNote.pitch)} · Chord · ${result.remainingNoteCount} notes`);
+    commit(result.score, `Removed ${pitchName(result.removedNote.pitch)} · Chord · ${countLabel(result.remainingNoteCount, "note")}`);
   }, [commit, score, selectedPartId, selectedStaffId]);
 
   const applyDynamic = useCallback((dynamic: DynamicMarking | null) => {
@@ -692,7 +695,7 @@ export function NotationStudio() {
       const contents = await file.text();
       const lowerName = file.name.toLowerCase();
       const isXml = lowerName.endsWith(".musicxml") || lowerName.endsWith(".xml") || file.type.includes("xml");
-      const imported = isXml ? importMusicXML(contents) : null;
+      const imported = isXml ? (await import("../lib/music/importers")).importMusicXML(contents) : null;
       const parsed = imported?.score ?? JSON.parse(contents) as ScoreDocument;
       const errors = validateScore(parsed);
       if (errors.length) throw new Error(errors[0]);
@@ -929,7 +932,7 @@ export function NotationStudio() {
           aria-modal={instrumentsOpen ? "true" : undefined}
           aria-labelledby="instrument-panel-title"
         >
-          <div className="panel-heading"><div><span className="eyebrow">{score.parts.length} PARTS</span><h2 id="instrument-panel-title">Instruments</h2></div><span className="panel-heading-actions"><button className="round-button" onClick={() => { setInstrumentsOpen(false); setAddOpen(true); }} aria-label="Add instrument"><Plus size={15} /></button><button className="icon-button drawer-close" onClick={() => setInstrumentsOpen(false)} aria-label="Close instruments"><X size={17} /></button></span></div>
+          <div className="panel-heading"><div><span className="eyebrow">{countLabel(score.parts.length, "PART", "PARTS")}</span><h2 id="instrument-panel-title">Instruments</h2></div><span className="panel-heading-actions"><button className="round-button" onClick={() => { setInstrumentsOpen(false); setAddOpen(true); }} aria-label="Add instrument"><Plus size={15} /></button><button className="icon-button drawer-close" onClick={() => setInstrumentsOpen(false)} aria-label="Close instruments"><X size={17} /></button></span></div>
           <div className="instrument-list">
             {score.parts.map((part, index) => (
               <button className={`instrument-row ${part.id === selectedPartId ? "selected" : ""}`} key={part.id} onClick={() => { selectPart(part.id); if (instrumentsOpen) setInstrumentsOpen(false); }} aria-pressed={part.id === selectedPartId}>
@@ -946,7 +949,7 @@ export function NotationStudio() {
 
         <section className="canvas-area" aria-label="Score canvas">
           <div className="canvas-controls">
-            <span>{viewMode === "score" ? `${score.parts.length}-part score` : selectedPart?.name}</span><span className="separator">•</span><span>{score.measureOrder.length} measures</span><span className="separator">•</span><span>{totalEvents} {selectedPart && selectedPart.staves.length > 1 ? "staff events" : "events"}</span>
+            <span>{viewMode === "score" ? `${score.parts.length}-part score` : selectedPart?.name}</span><span className="separator">•</span><span>{countLabel(score.measureOrder.length, "measure")}</span><span className="separator">•</span><span>{countLabel(totalEvents, selectedPart && selectedPart.staves.length > 1 ? "staff event" : "event")}</span>
             <span className="tool-section" role="group" aria-label="Measure controls">
               <button className="mode-pill" onClick={addEmptyMeasure} aria-label="Add empty measure"><Plus size={11} aria-hidden="true" /> Measure</button>
               <button className="mode-pill" onClick={removeEmptyMeasure} aria-label="Remove last empty measure"><Trash2 size={11} aria-hidden="true" /> Remove empty measure</button>
@@ -1107,7 +1110,7 @@ export function NotationStudio() {
               <button className="icon-button" onClick={cancelPendingImport} aria-label="Cancel MusicXML import"><X size={18} /></button>
             </header>
             <div className="import-warning-body">
-              <div className="import-warning-summary"><AlertTriangle size={17} /><span>Review these items before continuing publication work.</span></div>
+              <div className="import-warning-summary"><AlertTriangle size={17} /><span>Review the import details before continuing publication work.</span></div>
               <ol className="import-warning-list">{pendingImport.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}</ol>
             </div>
             <footer className="import-warning-actions"><button className="quiet-button" onClick={cancelPendingImport}>Cancel import</button><button className="primary-button" onClick={() => openImportedScore(pendingImport.score, `Opened ${pendingImport.score.metadata.title} from MusicXML · reviewed ${pendingImport.warnings.length} warning${pendingImport.warnings.length === 1 ? "" : "s"}`)}>Open editable copy</button></footer>
