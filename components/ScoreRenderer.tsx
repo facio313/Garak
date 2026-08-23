@@ -80,7 +80,8 @@ function measureMusicWidth(rows: readonly RenderRow[], measureId: string): numbe
     const events = getStaffVoice(row, measureId).events;
     let width = 92 + events.length * 18;
     for (const event of events) {
-      if (event.duration.dots) width += 8;
+      width += event.duration.dots * 8;
+      if (event.dynamic) width += 10;
       if (event.kind === "note") {
         width += Math.max(0, event.notes.length - 1) * 9;
         width += event.notes.filter((note) => note.pitch.alter !== 0).length * 7;
@@ -91,8 +92,7 @@ function measureMusicWidth(rows: readonly RenderRow[], measureId: string): numbe
   return Math.max(96, Math.min(430, ...(widths.length ? widths : [96])));
 }
 
-function modifierWidth(score: ScoreDocument, rows: readonly RenderRow[], measureId: string, systemStart: boolean): number {
-  const absoluteIndex = score.measureOrder.indexOf(measureId);
+function modifierWidth(score: ScoreDocument, rows: readonly RenderRow[], measureId: string, absoluteIndex: number, systemStart: boolean): number {
   const measure = score.measures[measureId];
   const previous = absoluteIndex > 0 ? score.measures[score.measureOrder[absoluteIndex - 1]] : null;
   const maxFifths = Math.max(0, ...rows.filter((row) => row.staff.clef !== "percussion").map((row) => Math.abs(writtenKeyForPart(measure.key, row.part).fifths)));
@@ -110,13 +110,13 @@ function buildSystems(score: ScoreDocument, rows: readonly RenderRow[], renderWi
   const systems: Array<{ measureIds: string[]; minimums: number[] }> = [];
   let current: { measureIds: string[]; minimums: number[] } = { measureIds: [], minimums: [] };
 
-  for (const measureId of score.measureOrder) {
-    let minimum = measureMusicWidth(rows, measureId) + modifierWidth(score, rows, measureId, current.measureIds.length === 0);
+  for (const [absoluteIndex, measureId] of score.measureOrder.entries()) {
+    let minimum = measureMusicWidth(rows, measureId) + modifierWidth(score, rows, measureId, absoluteIndex, current.measureIds.length === 0);
     const used = current.minimums.reduce((sum, value) => sum + value, 0);
     if (current.measureIds.length && used + minimum > usableWidth) {
       systems.push(current);
       current = { measureIds: [], minimums: [] };
-      minimum = measureMusicWidth(rows, measureId) + modifierWidth(score, rows, measureId, true);
+      minimum = measureMusicWidth(rows, measureId) + modifierWidth(score, rows, measureId, absoluteIndex, true);
     }
     current.measureIds.push(measureId);
     current.minimums.push(Math.max(96, minimum));
@@ -164,7 +164,7 @@ export function ScoreRenderer({ score, selectedPartId, viewMode, zoom, onSelectP
         return;
       }
       try {
-        const { Accidental, Beam, Dot, Formatter, Fraction, Renderer, Stave, StaveConnector, StaveNote, StaveTie, Voice, default: VexFlow } = await import("vexflow");
+        const { Accidental, Beam, Dot, Formatter, Fraction, GhostNote, Renderer, Stave, StaveConnector, StaveNote, StaveTie, TextDynamics, Voice } = await import("vexflow");
         if (disposed || !hostRef.current) return;
         const renderer = new Renderer(host, Renderer.Backends.SVG);
         renderer.resize(renderWidth, renderHeight);
@@ -255,7 +255,7 @@ export function ScoreRenderer({ score, selectedPartId, viewMode, zoom, onSelectP
 
           system.measureIds.forEach((measureId, measureIndex) => {
             const measure = score.measures[measureId];
-            const cells: Array<{ voice: VexVoice; notes: StaveNote[]; beams: VexBeam[]; stave: VexStave }> = [];
+            const cells: Array<{ voice: VexVoice; dynamicsVoice: VexVoice; notes: StaveNote[]; beams: VexBeam[]; stave: VexStave }> = [];
 
             rows.forEach((row) => {
               const stave = stavesByMeasure[measureIndex][row.rowIndex];
@@ -272,7 +272,7 @@ export function ScoreRenderer({ score, selectedPartId, viewMode, zoom, onSelectP
                   clef: row.staff.clef,
                   autoStem: true,
                   alignCenter: isEmptyMeasure,
-                  durationOverride: isEmptyMeasure ? new Fraction(fullMeasure.numerator * VexFlow.RESOLUTION, fullMeasure.denominator) : undefined,
+                  durationOverride: isEmptyMeasure ? new Fraction(fullMeasure.numerator, fullMeasure.denominator) : undefined,
                 });
                 if (event.kind === "note") {
                   event.notes.forEach((scoreNote, noteIndex) => {
@@ -281,27 +281,45 @@ export function ScoreRenderer({ score, selectedPartId, viewMode, zoom, onSelectP
                     noteRefs.set(scoreNote.id, { note, index: noteIndex, systemIndex });
                   });
                 }
-                if (event.duration.dots) Dot.buildAndAttach([note], { all: true });
+                for (let dotIndex = 0; dotIndex < event.duration.dots; dotIndex += 1) {
+                  Dot.buildAndAttach([note], { all: true });
+                }
                 note.setStave(stave);
                 return note;
+              });
+              const dynamicTickables = sourceEvents.map((event) => {
+                const duration = vexDuration(event).replace(/r$/, "");
+                const fullMeasure = getFullMeasureDuration(measure.time);
+                const dynamic = event.dynamic
+                  ? new TextDynamics({ duration, text: event.dynamic, line: 9 })
+                  : new GhostNote(isEmptyMeasure
+                    ? { duration, durationOverride: new Fraction(fullMeasure.numerator, fullMeasure.denominator) }
+                    : duration);
+                dynamic.setStave(stave);
+                return dynamic;
               });
               const voice = new Voice({ numBeats: measure.time.numerator, beatValue: measure.time.denominator })
                 .setMode(Voice.Mode.SOFT)
                 .setStave(stave)
                 .addTickables(notes);
+              const dynamicsVoice = new Voice({ numBeats: measure.time.numerator, beatValue: measure.time.denominator })
+                .setMode(Voice.Mode.SOFT)
+                .setStave(stave)
+                .addTickables(dynamicTickables);
               const beams = Beam.generateBeams(notes, {
                 groups: getDefaultBeamGroups(measure.time).map((group) => new Fraction(group.numerator, group.denominator)),
               });
-              cells.push({ voice, notes, beams, stave });
+              cells.push({ voice, dynamicsVoice, notes, beams, stave });
             });
 
             const noteStartX = Math.max(...cells.map((cell) => cell.stave.getNoteStartX()));
             cells.forEach((cell) => cell.stave.setNoteStartX(noteStartX));
             const justifyWidth = Math.max(24, cells[0].stave.getNoteEndX() - noteStartX);
-            const voices = cells.map((cell) => cell.voice);
+            const voices = cells.flatMap((cell) => [cell.voice, cell.dynamicsVoice]);
             new Formatter().joinVoices(voices).format(voices, justifyWidth, { context });
             cells.forEach((cell) => {
               cell.voice.draw(context, cell.stave);
+              cell.dynamicsVoice.draw(context, cell.stave);
               cell.beams.forEach((beam) => beam.setContext(context).draw());
             });
           });

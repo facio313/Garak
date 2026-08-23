@@ -197,6 +197,13 @@ kbd { display: inline-grid; min-width: 19px; height: 18px; place-items: center; 
 .shortcut-grid p { display: flex; align-items: center; gap: 4px; margin: 11px 0 0; color: #69655e; font-size: 9px; }
 .help-modal footer { display: flex; gap: 8px; align-items: flex-start; padding: 13px 19px; color: #7f7a72; font-size: 8px; line-height: 1.5; }
 .help-modal footer svg { flex: 0 0 auto; color: var(--copper); }
+.import-warning-modal { width: min(650px,100%); }
+.import-warning-body { max-height: min(430px,55vh); overflow-y: auto; padding: 16px 20px; }
+.import-warning-summary { display: flex; align-items: center; gap: 8px; border: 1px solid #dfc4a8; border-radius: 7px; background: #fff7eb; padding: 10px 12px; color: #7c542e; font-size: 9px; }
+.import-warning-summary svg { flex: 0 0 auto; color: var(--copper); }
+.import-warning-list { margin: 14px 0 0; padding-left: 22px; color: #625e56; font-size: 9px; line-height: 1.55; }
+.import-warning-list li + li { margin-top: 7px; }
+.import-warning-actions { display: flex; justify-content: flex-end; border-top: 1px solid #dedad2; padding: 12px 20px; background: #fffefa; }
 @keyframes fade-in { from { opacity: 0; } }
 @keyframes modal-in { from { opacity: 0; transform: translateY(8px) scale(.99); } }
 

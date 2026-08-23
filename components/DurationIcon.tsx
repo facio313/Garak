@@ -10,7 +10,7 @@ interface DurationIconProps {
  */
 export function DurationIcon({ value }: DurationIconProps) {
   const hasStem = value !== 1;
-  const flagCount = value === 16 ? 2 : value === 8 ? 1 : 0;
+  const flagCount = value === 64 ? 4 : value === 32 ? 3 : value === 16 ? 2 : value === 8 ? 1 : 0;
   const openHead = value === 1 || value === 2;
 
   return (
@@ -21,7 +21,7 @@ export function DurationIcon({ value }: DurationIconProps) {
       <span className="duration-notehead" />
       {hasStem ? <span className="duration-stem" /> : null}
       {Array.from({ length: flagCount }, (_, index) => (
-        <span className={`duration-flag flag-${index + 1}`} key={index} />
+        <span className={`duration-flag flag-${index + 1}`} style={{ top: `${1 + index * 6}px` }} key={index} />
       ))}
     </span>
   );

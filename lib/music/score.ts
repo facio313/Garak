@@ -1,8 +1,8 @@
 import { getInstrument, SCORE_TEMPLATES } from "./catalog";
 import { assertKeySignature } from "./key-signatures";
 import type { KeySignature } from "./key-signatures";
-import type { DurationValue, InstrumentSnapshot, MusicEvent, PartData, Pitch, ScoreDocument, ScoreNote, StaffSelector } from "./model";
-import { durationTicks, getPrimaryVoice, measureCapacity, resolveStaffIndex, voiceTicks } from "./model";
+import type { DurationValue, DynamicMarking, InstrumentSnapshot, MeasureMeta, MusicEvent, PartData, Pitch, ScoreDocument, ScoreNote, StaffSelector } from "./model";
+import { DYNAMIC_MARKINGS, TICKS_PER_WHOLE, durationTicks, getPrimaryVoice, measureCapacity, resolveStaffIndex, validateScore, voiceTicks } from "./model";
 
 const LETTERS = ["C", "D", "E", "F", "G", "A", "B"] as const;
 
@@ -107,14 +107,33 @@ export function createScore(templateId: string = "chamber", seedDemoOrOptions: b
 
 export function addInstrument(score: ScoreDocument, catalogId: string): ScoreDocument {
   const next = structuredClone(score);
-  next.parts.push(makePart(catalogId, next.parts.length, next.measureOrder));
+  const usedIds = collectScoreIds(next);
+
+  let candidateIndex = next.parts.length;
+  let candidate: PartData;
+  while (true) {
+    candidate = makePart(catalogId, candidateIndex, next.measureOrder);
+    const candidateIds = [candidate.id, ...candidate.staves.flatMap((staff) => [
+      staff.id,
+      ...Object.values(staff.measures).flatMap((measure) => measure.voices.map((voice) => voice.id)),
+    ])];
+    if (candidateIds.every((id) => !usedIds.has(id))) break;
+    candidateIndex += 1;
+  }
+  next.parts.push(candidate);
   return stamp(next);
 }
 
 export function removeInstrument(score: ScoreDocument, partId: string): ScoreDocument {
   if (score.parts.length <= 1) return score;
+  const removedPart = score.parts.find((part) => part.id === partId);
+  if (!removedPart) return score;
+  const removedNoteIds = new Set(removedPart.staves.flatMap((staff) => Object.values(staff.measures).flatMap((measure) =>
+    measure.voices.flatMap((voice) => voice.events.flatMap((event) => event.kind === "note" ? event.notes.map((note) => note.id) : [])),
+  )));
   const next = structuredClone(score);
   next.parts = next.parts.filter((part) => part.id !== partId);
+  next.ties = next.ties.filter((tie) => !removedNoteIds.has(tie.fromNoteId) && !removedNoteIds.has(tie.toNoteId));
   return stamp(next);
 }
 
@@ -142,6 +161,153 @@ export function setMeasureKey(score: ScoreDocument, measureId: string, key: KeyS
   return stamp(next);
 }
 
+export interface MeasureRangeChangeResult {
+  score: ScoreDocument;
+  changed: boolean;
+  measureId: string | null;
+  affectedMeasureIds: string[];
+  error?: string;
+}
+
+function sameKey(first: KeySignature, second: KeySignature): boolean {
+  return first.fifths === second.fifths && first.mode === second.mode;
+}
+
+function sameTime(first: MeasureMeta["time"], second: MeasureMeta["time"]): boolean {
+  return first.numerator === second.numerator && first.denominator === second.denominator;
+}
+
+/**
+ * Finds the effective-value run beginning at a chosen measure. Garak stores the
+ * effective key and meter on every measure, while notation boundaries are
+ * derived by comparing adjacent measures. Editing therefore continues until
+ * the next already-existing boundary instead of erasing a later change.
+ */
+function measureRunFrom<T>(
+  score: ScoreDocument,
+  measureId: string,
+  read: (measure: MeasureMeta) => T,
+  equal: (first: T, second: T) => boolean,
+): string[] {
+  const startIndex = score.measureOrder.indexOf(measureId);
+  const startMeasure = score.measures[measureId];
+  if (startIndex < 0 || !startMeasure) return [];
+  const initial = read(startMeasure);
+  const ids: string[] = [];
+  for (let index = startIndex; index < score.measureOrder.length; index += 1) {
+    const candidateId = score.measureOrder[index];
+    const candidate = score.measures[candidateId];
+    if (!candidate || !equal(read(candidate), initial)) break;
+    ids.push(candidateId);
+  }
+  return ids;
+}
+
+/** Sets a concert-key change from one measure through the next existing key-change boundary. */
+export function setKeyFromMeasure(score: ScoreDocument, measureId: string, key: KeySignature): MeasureRangeChangeResult {
+  try {
+    assertKeySignature(key);
+  } catch (error) {
+    return {
+      score,
+      changed: false,
+      measureId: null,
+      affectedMeasureIds: [],
+      error: error instanceof Error ? error.message : "Choose a valid concert key signature.",
+    };
+  }
+  const affectedMeasureIds = measureRunFrom(score, measureId, (measure) => measure.key, sameKey);
+  if (!affectedMeasureIds.length) {
+    return { score, changed: false, measureId: null, affectedMeasureIds, error: "Choose a measure that exists in this score." };
+  }
+  if (sameKey(score.measures[measureId].key, key)) {
+    return { score, changed: false, measureId, affectedMeasureIds: [] };
+  }
+
+  const next = structuredClone(score);
+  affectedMeasureIds.forEach((id) => { next.measures[id].key = { ...key }; });
+  return { score: stamp(next), changed: true, measureId, affectedMeasureIds };
+}
+
+/**
+ * Sets a time-signature change without re-barring music. Every affected voice
+ * is checked before cloning; if one would overflow, the exact source object is
+ * returned so undo history and autosave cannot observe a partial edit.
+ */
+export function setTimeFromMeasure(
+  score: ScoreDocument,
+  measureId: string,
+  time: MeasureMeta["time"],
+): MeasureRangeChangeResult {
+  if (!Number.isSafeInteger(time.numerator) || time.numerator <= 0 || time.numerator > 255 ||
+    !Number.isSafeInteger(time.denominator) || time.denominator <= 0 ||
+    !Number.isInteger(Math.log2(time.denominator))) {
+    return {
+      score,
+      changed: false,
+      measureId: null,
+      affectedMeasureIds: [],
+      error: "A time signature needs 1–255 whole-number beats and a power-of-two beat type.",
+    };
+  }
+  const affectedMeasureIds = measureRunFrom(score, measureId, (measure) => measure.time, sameTime);
+  if (!affectedMeasureIds.length) {
+    return { score, changed: false, measureId: null, affectedMeasureIds, error: "Choose a measure that exists in this score." };
+  }
+  if (sameTime(score.measures[measureId].time, time)) {
+    return { score, changed: false, measureId, affectedMeasureIds: [] };
+  }
+
+  const capacity = time.numerator * TICKS_PER_WHOLE / time.denominator;
+  if (!Number.isSafeInteger(capacity) || capacity <= 0) {
+    return {
+      score,
+      changed: false,
+      measureId,
+      affectedMeasureIds: [],
+      error: "That time signature cannot be represented safely.",
+    };
+  }
+  const affected = new Set(affectedMeasureIds);
+  for (const part of score.parts) {
+    for (let staffIndex = 0; staffIndex < part.staves.length; staffIndex += 1) {
+      const staff = part.staves[staffIndex];
+      for (const affectedMeasureId of affectedMeasureIds) {
+        const voices = staff.measures[affectedMeasureId]?.voices ?? [];
+        for (let voiceIndex = 0; voiceIndex < voices.length; voiceIndex += 1) {
+          const used = voiceTicks(voices[voiceIndex]);
+          if (used > capacity) {
+            const measureNumber = score.measures[affectedMeasureId]?.number ?? affectedMeasureId;
+            return {
+              score,
+              changed: false,
+              measureId,
+              affectedMeasureIds: [],
+              error: `Cannot change to ${time.numerator}/${time.denominator}: ${part.name}, staff ${staffIndex + 1}, measure ${measureNumber}, voice ${voiceIndex + 1} contains ${used} ticks but the new measure holds ${capacity}.`,
+            };
+          }
+        }
+      }
+    }
+  }
+
+  const next = structuredClone(score);
+  next.measureOrder.forEach((id) => {
+    if (affected.has(id)) next.measures[id].time = { ...time };
+  });
+  const validationError = validateScore(next)[0];
+  if (validationError) {
+    return {
+      score,
+      changed: false,
+      measureId,
+      affectedMeasureIds: [],
+      error: `Cannot change to ${time.numerator}/${time.denominator}: ${validationError}`,
+    };
+  }
+  return { score: stamp(next), changed: true, measureId, affectedMeasureIds };
+}
+
 function uniqueId(preferred: string, used: Set<string>): string {
   if (!used.has(preferred)) {
     used.add(preferred);
@@ -152,6 +318,24 @@ function uniqueId(preferred: string, used: Set<string>): string {
   const id = `${preferred}-${suffix}`;
   used.add(id);
   return id;
+}
+
+function collectScoreIds(score: ScoreDocument): Set<string> {
+  const used = new Set<string>([score.id, ...score.measureOrder, ...score.ties.map((tie) => tie.id)]);
+  score.parts.forEach((part) => {
+    used.add(part.id);
+    part.staves.forEach((staff) => {
+      used.add(staff.id);
+      Object.values(staff.measures).forEach((measure) => measure.voices.forEach((voice) => {
+        used.add(voice.id);
+        voice.events.forEach((event) => {
+          used.add(event.id);
+          if (event.kind === "note") event.notes.forEach((note) => used.add(note.id));
+        });
+      }));
+    });
+  });
+  return used;
 }
 
 function appendEmptyMeasure(score: ScoreDocument): string {
@@ -167,10 +351,7 @@ function appendEmptyMeasure(score: ScoreDocument): string {
   while (usedMeasureIds.has(`measure-${serial}`)) serial += 1;
   const measureId = `measure-${serial}`;
 
-  const usedVoiceIds = new Set<string>();
-  score.parts.forEach((part) => part.staves.forEach((staff) => Object.values(staff.measures).forEach((measure) => {
-    measure.voices.forEach((voice) => usedVoiceIds.add(voice.id));
-  })));
+  const usedIds = collectScoreIds(score);
 
   score.measureOrder.push(measureId);
   score.measures[measureId] = {
@@ -184,7 +365,7 @@ function appendEmptyMeasure(score: ScoreDocument): string {
     const voiceCount = Math.max(1, previousVoices.length);
     staff.measures[measureId] = {
       voices: Array.from({ length: voiceCount }, (_, index) => ({
-        id: uniqueId(`${staff.id}-${measureId}-v${index + 1}`, usedVoiceIds),
+        id: uniqueId(`${staff.id}-${measureId}-v${index + 1}`, usedIds),
         events: [],
       })),
     };
@@ -276,6 +457,332 @@ export function appendEvent(
   return { score: stamp(next), measureId: targetMeasureId };
 }
 
+export type AddChordToneResult =
+  | {
+      score: ScoreDocument;
+      added: true;
+      measureId: string;
+      eventId: string;
+      noteId: string;
+      error?: undefined;
+    }
+  | {
+      score: ScoreDocument;
+      added: false;
+      measureId: string | null;
+      eventId: string | null;
+      noteId: null;
+      error: string;
+    };
+
+/** Adds one written pitch to the selected staff's latest event without advancing musical time. */
+export function addChordTone(
+  score: ScoreDocument,
+  partId: string,
+  note: ScoreNote,
+  staffIdOrIndex: StaffSelector = 0,
+): AddChordToneResult {
+  const part = score.parts.find((item) => item.id === partId);
+  if (!part) {
+    return { score, added: false, measureId: null, eventId: null, noteId: null, error: "Select an instrument first." };
+  }
+  const staffIndex = resolveStaffIndex(part, staffIdOrIndex);
+  if (staffIndex < 0) {
+    return { score, added: false, measureId: null, eventId: null, noteId: null, error: "Select a valid staff first." };
+  }
+
+  let target: { measureId: string; eventIndex: number; event: MusicEvent } | null = null;
+  for (let measureIndex = score.measureOrder.length - 1; measureIndex >= 0; measureIndex -= 1) {
+    const measureId = score.measureOrder[measureIndex];
+    const events = part.staves[staffIndex].measures[measureId]?.voices[0]?.events;
+    if (!events?.length) continue;
+    const eventIndex = events.length - 1;
+    target = { measureId, eventIndex, event: events[eventIndex] };
+    break;
+  }
+
+  if (!target) {
+    return { score, added: false, measureId: null, eventId: null, noteId: null, error: "Enter a note before adding a chord tone." };
+  }
+  if (target.event.kind === "rest") {
+    return {
+      score,
+      added: false,
+      measureId: target.measureId,
+      eventId: target.event.id,
+      noteId: null,
+      error: "The last event is a rest. Enter a note before adding a chord tone.",
+    };
+  }
+
+  const sameWrittenPitch = target.event.notes.some((existing) =>
+    existing.pitch.step === note.pitch.step &&
+    existing.pitch.alter === note.pitch.alter &&
+    existing.pitch.octave === note.pitch.octave,
+  );
+  if (sameWrittenPitch) {
+    return {
+      score,
+      added: false,
+      measureId: target.measureId,
+      eventId: target.event.id,
+      noteId: null,
+      error: "That written pitch is already in the chord.",
+    };
+  }
+
+  const noteIdInUse = score.parts.some((candidatePart) => candidatePart.staves.some((staff) =>
+    Object.values(staff.measures).some((measure) => measure.voices.some((voice) => voice.events.some((event) =>
+      event.kind === "note" && event.notes.some((existing) => existing.id === note.id),
+    ))),
+  ));
+  if (noteIdInUse) {
+    return {
+      score,
+      added: false,
+      measureId: target.measureId,
+      eventId: target.event.id,
+      noteId: null,
+      error: "That chord-tone ID is already in use.",
+    };
+  }
+
+  const next = structuredClone(score);
+  const nextEvent = next.parts.find((item) => item.id === partId)!
+    .staves[staffIndex].measures[target.measureId].voices[0].events[target.eventIndex];
+  if (nextEvent.kind !== "note") {
+    return {
+      score,
+      added: false,
+      measureId: target.measureId,
+      eventId: target.event.id,
+      noteId: null,
+      error: "The last event is not available for chord entry.",
+    };
+  }
+  nextEvent.notes.push(structuredClone(note));
+  return {
+    score: stamp(next),
+    added: true,
+    measureId: target.measureId,
+    eventId: target.event.id,
+    noteId: note.id,
+  };
+}
+
+export type RemoveLastChordToneResult =
+  | {
+      score: ScoreDocument;
+      removed: true;
+      measureId: string;
+      eventId: string;
+      removedNote: ScoreNote;
+      remainingNoteCount: number;
+      error?: undefined;
+    }
+  | {
+      score: ScoreDocument;
+      removed: false;
+      measureId: string | null;
+      eventId: string | null;
+      removedNote: null;
+      remainingNoteCount: null;
+      error: string;
+    };
+
+/** Removes only the latest tone from the selected staff's latest chord without advancing musical time. */
+export function removeLastChordTone(
+  score: ScoreDocument,
+  partId: string,
+  staffIdOrIndex: StaffSelector = 0,
+): RemoveLastChordToneResult {
+  const part = score.parts.find((item) => item.id === partId);
+  if (!part) {
+    return {
+      score,
+      removed: false,
+      measureId: null,
+      eventId: null,
+      removedNote: null,
+      remainingNoteCount: null,
+      error: "Select an instrument first.",
+    };
+  }
+  const staffIndex = resolveStaffIndex(part, staffIdOrIndex);
+  if (staffIndex < 0) {
+    return {
+      score,
+      removed: false,
+      measureId: null,
+      eventId: null,
+      removedNote: null,
+      remainingNoteCount: null,
+      error: "Select a valid staff first.",
+    };
+  }
+
+  let target: { measureId: string; eventIndex: number; event: MusicEvent } | null = null;
+  for (let measureIndex = score.measureOrder.length - 1; measureIndex >= 0; measureIndex -= 1) {
+    const measureId = score.measureOrder[measureIndex];
+    const events = part.staves[staffIndex].measures[measureId]?.voices[0]?.events;
+    if (!events?.length) continue;
+    const eventIndex = events.length - 1;
+    target = { measureId, eventIndex, event: events[eventIndex] };
+    break;
+  }
+
+  if (!target) {
+    return {
+      score,
+      removed: false,
+      measureId: null,
+      eventId: null,
+      removedNote: null,
+      remainingNoteCount: null,
+      error: "There is no event on the selected staff. Enter a chord before removing a chord tone.",
+    };
+  }
+  if (target.event.kind === "rest") {
+    return {
+      score,
+      removed: false,
+      measureId: target.measureId,
+      eventId: target.event.id,
+      removedNote: null,
+      remainingNoteCount: null,
+      error: "The last event is a rest. Select a chord before removing a chord tone.",
+    };
+  }
+  if (target.event.notes.length < 2) {
+    return {
+      score,
+      removed: false,
+      measureId: target.measureId,
+      eventId: target.event.id,
+      removedNote: null,
+      remainingNoteCount: null,
+      error: "The last note event needs at least two tones before a chord tone can be removed.",
+    };
+  }
+
+  const next = structuredClone(score);
+  const nextEvent = next.parts.find((item) => item.id === partId)!
+    .staves[staffIndex].measures[target.measureId].voices[0].events[target.eventIndex];
+  if (nextEvent.kind !== "note" || nextEvent.notes.length < 2) {
+    return {
+      score,
+      removed: false,
+      measureId: target.measureId,
+      eventId: target.event.id,
+      removedNote: null,
+      remainingNoteCount: null,
+      error: "The last chord is not available for tone removal.",
+    };
+  }
+  const removedNote = nextEvent.notes.pop()!;
+  next.ties = next.ties.filter((tie) => tie.fromNoteId !== removedNote.id && tie.toNoteId !== removedNote.id);
+  return {
+    score: stamp(next),
+    removed: true,
+    measureId: target.measureId,
+    eventId: target.event.id,
+    removedNote,
+    remainingNoteCount: nextEvent.notes.length,
+  };
+}
+
+export type SetLastEventDynamicResult =
+  | {
+      score: ScoreDocument;
+      changed: boolean;
+      measureId: string;
+      eventId: string;
+      previousDynamic: DynamicMarking | null;
+      dynamic: DynamicMarking | null;
+      error?: undefined;
+    }
+  | {
+      score: ScoreDocument;
+      changed: false;
+      measureId: string | null;
+      eventId: string | null;
+      previousDynamic: null;
+      dynamic: DynamicMarking | null;
+      error: string;
+    };
+
+/** Attaches, replaces, or clears a semantic dynamic on the selected staff's latest event. */
+export function setLastEventDynamic(
+  score: ScoreDocument,
+  partId: string,
+  dynamic: DynamicMarking | null,
+  staffIdOrIndex: StaffSelector = 0,
+): SetLastEventDynamicResult {
+  if (dynamic !== null && !DYNAMIC_MARKINGS.includes(dynamic)) {
+    return {
+      score,
+      changed: false,
+      measureId: null,
+      eventId: null,
+      previousDynamic: null,
+      dynamic,
+      error: "Choose ppp, pp, p, mp, mf, f, ff, fff, or none.",
+    };
+  }
+  const part = score.parts.find((item) => item.id === partId);
+  if (!part) {
+    return {
+      score,
+      changed: false,
+      measureId: null,
+      eventId: null,
+      previousDynamic: null,
+      dynamic,
+      error: "Select an instrument first.",
+    };
+  }
+  const staffIndex = resolveStaffIndex(part, staffIdOrIndex);
+  if (staffIndex < 0) {
+    return {
+      score,
+      changed: false,
+      measureId: null,
+      eventId: null,
+      previousDynamic: null,
+      dynamic,
+      error: "Select a valid staff first.",
+    };
+  }
+
+  for (let measureIndex = score.measureOrder.length - 1; measureIndex >= 0; measureIndex -= 1) {
+    const measureId = score.measureOrder[measureIndex];
+    const events = part.staves[staffIndex].measures[measureId]?.voices[0]?.events;
+    if (!events?.length) continue;
+    const eventIndex = events.length - 1;
+    const event = events[eventIndex];
+    const previousDynamic = event.dynamic ?? null;
+    if (previousDynamic === dynamic) {
+      return { score, changed: false, measureId, eventId: event.id, previousDynamic, dynamic };
+    }
+    const next = structuredClone(score);
+    const nextEvent = next.parts.find((item) => item.id === partId)!
+      .staves[staffIndex].measures[measureId].voices[0].events[eventIndex];
+    if (dynamic === null) delete nextEvent.dynamic;
+    else nextEvent.dynamic = dynamic;
+    return { score: stamp(next), changed: true, measureId, eventId: event.id, previousDynamic, dynamic };
+  }
+
+  return {
+    score,
+    changed: false,
+    measureId: null,
+    eventId: null,
+    previousDynamic: null,
+    dynamic,
+    error: "Enter a note or rest before adding a dynamic.",
+  };
+}
+
 export function removeLastEvent(score: ScoreDocument, partId: string, staffIdOrIndex: StaffSelector = 0): ScoreDocument {
   const next = structuredClone(score);
   const part = next.parts.find((item) => item.id === partId);
@@ -323,7 +830,12 @@ export function toggleTieLastTwo(
     next.ties.splice(existing, 1);
     return { score: stamp(next), tied: false };
   }
-  next.ties.push({ id: `tie-${from.id}-${to.id}`, fromNoteId: from.id, toNoteId: to.id });
+  const tieId = uniqueId(`tie-${from.id}-${to.id}`, collectScoreIds(next));
+  next.ties.push({ id: tieId, fromNoteId: from.id, toNoteId: to.id });
+  const validationError = validateScore(next).find((error) => error.startsWith("Tie "));
+  if (validationError) {
+    return { score, tied: false, error: `Tie could not be added. ${validationError}` };
+  }
   return { score: stamp(next), tied: true };
 }
 
