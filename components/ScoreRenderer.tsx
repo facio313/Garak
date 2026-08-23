@@ -154,10 +154,29 @@ export function ScoreRenderer({ score, selectedPartId, viewMode, zoom, onSelectP
   const renderHeight = Math.max(230, systems.length * systemHeight + 22);
 
   useEffect(() => {
-    if (!frameRef.current) return;
-    const observer = new ResizeObserver(([entry]) => setPhysicalWidth(Math.max(320, Math.floor(entry.contentRect.width))));
-    observer.observe(frameRef.current);
-    return () => observer.disconnect();
+    const frame = frameRef.current;
+    if (!frame) return;
+    let initialized = false;
+    let resizeTimer: number | null = null;
+    let pendingWidth = 0;
+    const observer = new ResizeObserver(([entry]) => {
+      pendingWidth = Math.max(320, Math.floor(entry.contentRect.width));
+      if (!initialized) {
+        initialized = true;
+        setPhysicalWidth(pendingWidth);
+        return;
+      }
+      if (resizeTimer !== null) window.clearTimeout(resizeTimer);
+      resizeTimer = window.setTimeout(() => {
+        resizeTimer = null;
+        setPhysicalWidth(pendingWidth);
+      }, 120);
+    });
+    observer.observe(frame);
+    return () => {
+      observer.disconnect();
+      if (resizeTimer !== null) window.clearTimeout(resizeTimer);
+    };
   }, []);
 
   useEffect(() => {

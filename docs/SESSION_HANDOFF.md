@@ -33,7 +33,7 @@
 - MusicXML source ID는 256 code unit으로 제한하고 compact internal descendant ID에 증폭하지 않습니다. Exporter는 opaque native part ID를 XML 이름 규칙에 맞는 unique ID로 바꾸고 모든 reference에서 같은 mapping을 사용합니다.
 - MusicXML은 실제 key/time boundary, initial tempo, dynamic direction, 단일 event-level articulation, multi-staff attributes·staff·voice·backup·full-measure rest를 보존합니다. MIDI는 실제 time-signature boundary와 staff별 dynamic/articulation velocity 및 staccato duration을 포함하며, MIDI와 playback 모두 모든 staff의 schema-v1 voice를 사용합니다. MIDI는 VLQ `0x0FFFFFFF` 상한, 960→480 PPQ 반올림과 최소 1-tick note를 적용하고, 같은 port/channel/pitch overlap은 긴 interval로 합쳐 later reattack/velocity를 잃는 compromise가 있습니다.
 - MIDI/MusicXML routing은 instrument family가 아니라 clef를 기준으로 합니다. Percussion clef만 GM channel 10을 쓰고 timpani·glockenspiel 같은 pitched percussion은 melodic route를 사용합니다. Port마다 melodic route 15개, 전체 pitched 240개와 독립 unpitched-percussion part 16개가 상한이며 초과 시 명시적으로 실패합니다. MusicXML [`<midi-device>` port](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/midi-device/)는 1–16, 같은 SMF `FF 21` port는 0–15입니다.
-- New/Add/Help/Import-warning modal은 dialog initial focus, sibling `inert`, Tab/Shift+Tab trap, Escape close, 이전 focus 복원을 적용합니다.
+- New/Add/Help/Import-warning modal과 responsive Inspector/Instruments drawer는 dialog initial focus, sibling `inert`, Tab/Shift+Tab trap, Escape close, 이전 focus 복원을 적용합니다.
 - `public/og.png`에는 검증된 Garak social card가 있습니다.
 
 Native validator hard ceiling은 ordered measure 20,000, part 256, 전체 staff 512, staff×measure cell/voice 10,000, event 50,000, note 100,000, tie 50,000, absolute timeline 536,870,910 tick입니다. 첫 200개 validation error 뒤에는 omission summary를 반환합니다. Base ID 256, voice ID 1,024, note/tie reference 512, tie ID 2,048 UTF-16 code unit 제한과 part/staff/voice/event/note/tie object ID의 global uniqueness도 유지합니다.
@@ -53,7 +53,7 @@ Native validator hard ceiling은 ordered measure 20,000, part 256, 전체 staff 
 
 실제 브라우저 검증은 자동 테스트와 별도입니다. 루트 작업에서 강제 reload 후 조옮김 written key, 6/8 beam, system에서의 박자표 중복, full-measure rest, 55/82/100/150% zoom과 scroll, duration 아이콘 glyph, brace/bracket·spacing, runtime/console 오류를 PNG·DOM 수치와 함께 별도로 확인했습니다.
 
-MusicXML/Chord acceptance도 실제 file chooser로 확인했습니다. `.musicxml`을 고르면 제목·작곡가·Violin·G major·1 measure·G+B 2-note chord가 즉시 편집 가능한 상태로 열렸고, 지원하지 않는 Voice 2는 modal에 정확히 warning 1건으로 표시됐습니다. Continue editing 후 Chord mode에서 D4를 추가해 event count가 1로 유지되고 Inspector가 `Chord · 3 notes`, playback 상태가 `Playing 3 notes at ♩ = 96`인 것을 확인했습니다. 이 브라우저 증거는 자동 테스트 개수에 합산하지 않습니다.
+MusicXML/Chord acceptance도 실제 file chooser로 확인했습니다. `.musicxml`의 지원하지 않는 Voice 2 warning을 검토하는 동안 현재 악보와 autosave는 바뀌지 않았고, `Cancel import`는 원본을 유지했습니다. 다시 가져와 `Open editable copy`를 선택한 뒤에만 제목·작곡가·Violin·G major·1 measure·G+B 2-note chord가 편집 상태로 열렸습니다. 이어 Chord mode에서 D4를 추가해 event count가 1로 유지되고 Inspector가 `Chord · 3 notes`, playback 상태가 `Playing 3 notes at ♩ = 96`인 것을 확인했습니다. 이 브라우저 증거는 자동 테스트 개수에 합산하지 않습니다.
 
 ## 수동 smoke
 
@@ -65,7 +65,7 @@ MusicXML/Chord acceptance도 실제 file chooser로 확인했습니다. `.musicx
 6. 같은 pitch 두 번 입력 후 `T`, 이어 `Cmd+Z`, `Cmd+Shift+Z`를 확인합니다.
 7. Space playback과 Score/Part 전환을 확인합니다.
 8. JSON, MusicXML, MIDI export 후 새로고침 복구를 확인합니다.
-9. Primary-voice chord와 미지원 Voice 2가 함께 든 `.musicxml`을 import해 warning 1건, chord 사보, Continue editing을 확인합니다.
+9. Primary-voice chord와 미지원 Voice 2가 함께 든 `.musicxml`을 import해 warning 1건을 확인합니다. 먼저 `Cancel import`로 현재 악보가 유지되는지 확인한 뒤 다시 가져와 `Open editable copy`를 선택하고 chord 사보를 확인합니다.
 10. `6`, `7`, `.`을 사용해 32nd·64th와 점 없음→한 점→겹점 순환을 확인합니다.
 11. Chord mode에서 imported chord에 D4를 추가하고 event count 1, Inspector 3 notes, 3-note playback을 확인합니다.
 12. Chord mode에서 Backspace로 마지막 D4 tone만 제거한 뒤 event count·duration이 그대로이고 한 번의 undo로 3-note chord가 복원되는지 확인합니다.
@@ -74,7 +74,7 @@ MusicXML/Chord acceptance도 실제 file chooser로 확인했습니다. `.musicx
 15. 저장을 두 번 바꿔 primary와 backup을 만든 뒤 primary만 손상시켜 last-known-good 복구 status를 확인합니다. Quota/write 실패를 모의할 때는 기존 primary가 유지되고 성공 status가 나오지 않아야 합니다.
 16. Backup recovery 직후 한 번 편집하고 기다려 damaged primary raw가 그대로인지 확인한 뒤 Save now 또는 New에서만 autosave가 다시 시작되는지 확인합니다.
 17. Preset 밖의 유효한 imported meter가 Inspector에 `imported/custom`으로 보이고, 5/8·7/8 빈 마디가 중앙 정렬 full-measure rest로 그려지는지 확인합니다.
-18. New/Add/Help/Import warning modal마다 focus가 dialog 안에 갇히고 배경이 inert이며 Escape 후 trigger로 돌아오는지 확인합니다.
+18. New/Add/Help/Import warning modal과 responsive Inspector/Instruments drawer마다 focus가 내부에 갇히고 배경이 inert이며 Escape 후 trigger로 돌아오는지 확인합니다.
 19. 선택 staff에 note 뒤 trailing rest를 입력하고 articulation을 staccato→accent→None으로 바꿔 rest가 아니라 note를 대상으로 하는지, SVG mark·undo/redo·playback/MIDI gate/velocity·MusicXML export/re-import가 일치하는지 확인합니다. Multiple supported marks, below placement, downward strong-accent, rest mark, breath-mark fixture의 warning도 함께 확인합니다.
 
 ## 다음 P0 구현 순서
@@ -158,9 +158,9 @@ MusicXML/Chord acceptance도 실제 file chooser로 확인했습니다. `.musicx
 - Chord mode의 last-event pitch 추가와 마지막 추가 tone 제거 subset은 지원하지만 stable notehead의 임의 selection·수정·삭제·tie와 chord symbol은 없습니다.
 - Key/time은 선택 measure부터 다음 기존 change boundary 직전까지 바꿀 수 있고 overflow/resulting-score validation은 전체 변경 전에 거부합니다. 음악을 자동 재배치하는 rebar, pickup metadata, custom meter/beam authoring은 없습니다. Imported custom meter는 표시만 보존합니다.
 - Dynamics 편집은 선택 staff의 시간상 마지막 note/rest event만 대상으로 합니다. MusicXML import는 8단계 dynamic direction을 다음 선택-primary-voice event에 붙이는 subset이며, offset은 cursor를 움직이지 않고 warning과 함께 무시하고 above placement는 below로 정규화합니다. 지원 mark가 여러 개인 composite도 warning과 함께 마지막 mark로 정규화합니다. Hairpin/wedge, `sfz`·other/sound-only dynamic, composite 원형 의미, 비선택 voice와 임의 event selection은 없습니다.
-- Articulation 편집은 선택 staff의 마지막 note event와 event/chord당 하나만 대상으로 합니다. Placement/direction은 above/up으로 정규화하고, 서로 다른 여러 지원 mark는 warning과 함께 source 순서상 마지막 값을 사용합니다. 임의 event 선택·복수 mark·slur·breath·fermata·ornaments는 없습니다. `<fermata>`와 `<ornaments>`는 현재 articulation importer의 모델·warning·round-trip 대상이 아닙니다.
+- Articulation 편집은 선택 staff의 마지막 note event와 event/chord당 하나만 대상으로 합니다. Placement/direction은 above/up으로 정규화하고, 서로 다른 여러 지원 mark는 warning과 함께 source 순서상 마지막 값을 사용합니다. 개별 chord tone에만 있던 mark가 전체 editable chord event로 확대되면 위치 기반 warning을 냅니다. 임의 event 선택·복수 mark·slur·breath·fermata·ornaments는 없습니다. `<fermata>`와 `<ornaments>`는 현재 articulation importer의 모델·warning·round-trip 대상이 아닙니다.
 - playback은 oscillator fallback이고 실제 GM program별 sample을 사용하지 않습니다.
-- Tie chain은 exact same-pitch/stream adjacency만 허용하고 playback/MIDI에서 하나의 지속음으로 합쳐집니다. 현재 articulation transform 뒤에도 이 adjacency 불변식을 유지하며, pedal은 아직 없습니다.
+- Tie chain은 exact same-pitch/stream adjacency만 허용하고 playback/MIDI에서 하나의 지속음으로 합쳐집니다. 현재 articulation transform은 chain 첫 event만 사용하므로 중간·마지막 destination-only staccato는 SVG/XML에는 남지만 재생 gate에 영향을 주지 않습니다. Chain mark 집계/거부 정책과 pedal은 후속 범위입니다.
 - Live playback은 oscillator fallback이며 600-note scheduling window 뒤를 재생하지 않습니다. MIDI는 480 PPQ quantization과 same-port/channel/pitch overlap merge로 later reattack을 버립니다. 멀티 포트 routing은 지원하지만 exact expressive reattack은 여전히 보존하지 않습니다.
 - MusicXML import는 uncompressed score-partwise `.musicxml`/`.xml`의 staff별 primary voice, 8단계 dynamic direction과 4개 articulation subset으로 제한됩니다. `.mxl`, multiple voices, semantic tuplets, fermata·ornaments·slur 및 나머지 directions/expressions, repeats, layout round-trip, parser depth/node budget과 광범위한 외부 앱 compatibility corpus는 아직 없습니다.
 - 전체 score를 multi-system SVG 하나로 그립니다. 수백 measure 전에 page/system pagination·virtualization이 필요합니다.

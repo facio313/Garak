@@ -914,6 +914,7 @@ export function importMusicXML(xml: string): MusicXMLImportResult {
     const pendingTies = new Map<string, { noteId: string; endTick: number; eventSequence: number }>();
     const noteEventSequenceByVoice = new Map<string, number>();
     const pendingDynamics = new Map<string, { dynamic: DynamicMarking; context: string }>();
+    const warnedChordArticulationEvents = new Set<string>();
     let divisions = 1;
 
     sourceMeasures[partIndex].forEach((measureNode, measureIndex) => {
@@ -1203,6 +1204,10 @@ export function importMusicXML(xml: string): MusicXMLImportResult {
             throw new Error(`The MusicXML score exceeds Garak's ${MAX_MATERIALIZED_NOTES.toLocaleString("en-US")}-note materialization safety limit.`);
           }
           if (articulation) {
+            if (!warnedChordArticulationEvents.has(precedingEvent.id)) {
+              warnings.push(`${context}: articulation on an individual chord tone cannot be preserved; ${articulation} was applied to the whole editable chord event.`);
+              warnedChordArticulationEvents.add(precedingEvent.id);
+            }
             if (precedingEvent.articulation && precedingEvent.articulation !== articulation) {
               warnings.push(`${context}: conflicting chord articulations ${precedingEvent.articulation} and ${articulation} target one editable event; the later ${articulation} mark was used.`);
             }

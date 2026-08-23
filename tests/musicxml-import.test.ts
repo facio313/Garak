@@ -471,8 +471,46 @@ test("MusicXML articulation import keeps supported marks and reports every lossy
   assert.match(report, /down strong-accent direction.*marcato.*normalized upward/i);
   assert.match(report, /multiple supported articulations accent and marcato.*later marcato/i);
   assert.match(report, /unsupported articulation breath-mark was skipped/i);
+  assert.match(report, /measure 2, note 2: articulation on an individual chord tone.*marcato was applied to the whole editable chord event/i);
   assert.match(report, /conflicting chord articulations accent and marcato.*later marcato/i);
   assert.match(report, /staccato on a rest cannot be represented and was skipped/i);
+  assert.deepEqual(validateScore(imported.score), []);
+});
+
+test("MusicXML reports chord-tone articulation widening once per editable chord event", () => {
+  const xml = `<score-partwise version="4.0">
+    <part-list><score-part id="P1"><part-name>Chord warning</part-name></score-part></part-list>
+    <part id="P1"><measure number="1">
+      <attributes><divisions>480</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>480</duration><voice>1</voice><type>quarter</type></note>
+      <note><chord/><pitch><step>E</step><octave>4</octave></pitch><duration>480</duration><voice>1</voice><type>quarter</type><notations><articulations><staccato/></articulations></notations></note>
+      <note><chord/><pitch><step>G</step><octave>4</octave></pitch><duration>480</duration><voice>1</voice><type>quarter</type><notations><articulations><staccato/></articulations></notations></note>
+      <note><pitch><step>D</step><octave>4</octave></pitch><duration>480</duration><voice>1</voice><type>quarter</type><notations><articulations><accent/></articulations></notations></note>
+      <note><chord/><pitch><step>F</step><octave>4</octave></pitch><duration>480</duration><voice>1</voice><type>quarter</type><notations><articulations><accent/></articulations></notations></note>
+    </measure></part>
+  </score-partwise>`;
+
+  const imported = importMusicXML(xml);
+  const events = getPrimaryVoice(imported.score.parts[0], imported.score.measureOrder[0]).events;
+  assert.equal(events.length, 2);
+  assert.deepEqual(events.map((event) => event.kind === "note" ? {
+    notes: event.notes.map((note) => note.pitch.step),
+    articulation: event.articulation ?? null,
+  } : null), [
+    { notes: ["C", "E", "G"], articulation: "staccato" },
+    { notes: ["D", "F"], articulation: "accent" },
+  ]);
+
+  const wideningWarnings = imported.warnings.filter((warning) => warning.includes("articulation on an individual chord tone"));
+  assert.equal(wideningWarnings.length, 2, "repeated articulation marks on tones of one chord must not amplify warnings");
+  assert.match(wideningWarnings[0], /^Chord warning, measure 1, note 2: articulation on an individual chord tone cannot be preserved; staccato was applied to the whole editable chord event\.$/);
+  assert.match(wideningWarnings[1], /^Chord warning, measure 1, note 5: articulation on an individual chord tone cannot be preserved; accent was applied to the whole editable chord event\.$/);
+  assert.equal(imported.warnings.length, 2, "same-articulation chord tones need one explicit widening warning and no conflict warning");
+
+  const exported = scoreToMusicXML(imported.score);
+  assert.equal((exported.match(/<staccato\/>/g) ?? []).length, 1);
+  assert.equal((exported.match(/<accent\/>/g) ?? []).length, 1);
+  assert.deepEqual(importMusicXML(exported).warnings, [], "Garak's event-level export no longer needs chord-tone normalization");
   assert.deepEqual(validateScore(imported.score), []);
 });
 

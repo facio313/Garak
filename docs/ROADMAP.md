@@ -45,7 +45,7 @@
 - preset 밖의 유효한 imported meter를 Inspector에 exact value와 `imported/custom`으로 표시
 - 음악 도메인·MusicXML import·서버 렌더 회귀와 typecheck, lint, production build; 정확한 테스트 개수와 통과 상태는 최신 명령 출력 기준
 
-실제 브라우저의 SVG, 조표·박자표, beam, zoom/scroll, 아이콘, bracket·spacing, console 상태는 루트 검증이 별도 증거로 확인했습니다. 실제 `.musicxml` file chooser import에서도 제목·작곡가·Violin·G major·한 마디·2-note chord가 즉시 편집 가능한 상태로 열렸고, 미지원 Voice 2는 warning modal에 정확히 한 건으로 표시됐습니다. Continue editing 뒤 G+B 사보, Chord mode의 D4 추가 후 event 1개와 `Chord · 3 notes`, 3-note playback도 확인했습니다. 이 수동 브라우저 증거는 자동 테스트와 구분합니다.
+실제 브라우저의 SVG, 조표·박자표, beam, zoom/scroll, 아이콘, bracket·spacing, console 상태는 루트 검증이 별도 증거로 확인했습니다. 실제 `.musicxml` file chooser import에서도 미지원 Voice 2 warning을 검토하는 동안 현재 악보가 그대로 유지됐고, `Cancel import`는 원본을 보존했으며 다시 가져와 `Open editable copy`를 선택한 뒤에만 제목·작곡가·Violin·G major·한 마디·G+B 2-note chord가 편집 상태로 열렸습니다. 이어 Chord mode의 D4 추가 후 event 1개와 `Chord · 3 notes`, 3-note playback도 확인했습니다. 이 수동 브라우저 증거는 자동 테스트와 구분합니다.
 
 Native validator의 현재 hard ceiling은 ordered measure 20,000, part 256, 전체 staff 512, staff×measure cell/voice 10,000, event 50,000, note 100,000, tie 50,000, absolute timeline 536,870,910 tick입니다. 첫 200개 validation error 뒤에는 deterministic omission summary를 반환합니다. Base ID 256, voice ID 1,024, note/tie-reference 512, tie ID 2,048 UTF-16 code unit 상한과 part/staff/voice/event/note/tie object ID의 global uniqueness도 schema-v1 공개 계약입니다.
 
@@ -57,7 +57,7 @@ Native validator의 현재 hard ceiling은 ordered measure 20,000, part 256, 전
 - Chord mode는 마지막 note event에 pitch를 추가하고 마지막에 추가한 tone을 제거할 수 있지만, 임의 notehead 선택·수정·삭제·개별 tie와 chord symbol은 미지원
 - Key/time range command는 선택 마디부터 다음 기존 change boundary 직전까지만 바꾸고 resulting score가 invalid이면 원자 거부하며, overflow 음악을 재배치하는 rebar, pickup, custom meter/beam grouping은 미지원
 - Dynamics 편집은 선택 staff의 시간상 마지막 event만 대상으로 하며, import도 8단계 MusicXML dynamic direction subset만 지원합니다. Hairpin/wedge, `sfz`·other/sound-only dynamic, composite 원형 의미, direction offset 보존, 임의 event 선택은 미지원
-- Articulation 편집은 선택 staff의 마지막 note event와 event/chord당 단일 mark만 대상으로 합니다. 복수 mark 조합·placement/direction 편집·임의 event 선택, slur·breath·fermata·ornament는 미지원입니다. MusicXML의 겹치는 지원 mark는 warning과 함께 마지막 값으로 정규화하고, `<fermata>`와 `<ornaments>`는 현재 articulation importer가 보존하지 않습니다.
+- Articulation 편집은 선택 staff의 마지막 note event와 event/chord당 단일 mark만 대상으로 합니다. 복수 mark 조합·placement/direction 편집·임의 event 선택, slur·breath·fermata·ornament는 미지원입니다. MusicXML의 겹치는 지원 mark는 warning과 함께 마지막 값으로 정규화하고, 개별 chord tone mark의 event-level 확대도 warning으로 공개합니다. Tie chain 연주는 첫 event articulation만 사용하므로 destination-only staccato는 SVG/XML에는 남지만 gate를 바꾸지 않습니다. `<fermata>`와 `<ornaments>`는 현재 articulation importer가 보존하지 않습니다.
 - grand staff와 Organ 3 staff는 지원하지만 각 staff의 primary voice만 편집·export
 - 마지막 이벤트 기반 입력·삭제이며 stable caret/range selection과 copy/paste는 미지원
 - percussion preset은 있으나 note map editor 없음

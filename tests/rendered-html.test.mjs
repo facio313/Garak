@@ -165,6 +165,9 @@ test("ships product metadata and removes the disposable starter", async () => {
   assert.ok(renderer.includes("new Fraction(fullMeasure.numerator, fullMeasure.denominator)"), "empty-meter rests must use a whole-note fraction rather than pre-scaled ticks");
   assert.ok(renderer.includes("dynamicsVoice?: VexVoice"), "cells without dynamics must not allocate a spacer voice");
   assert.ok(renderer.includes("cell.dynamicsVoice?.draw"), "optional dynamics voices must draw only when present");
+  assert.ok(renderer.includes("window.setTimeout(() =>"), "continuous resize events must be coalesced before re-engraving");
+  assert.ok(renderer.includes("}, 120)"), "resize re-engraving must use the bounded debounce interval");
+  assert.ok(renderer.includes("window.clearTimeout(resizeTimer)"), "resize debounce timers must be replaced and cleaned up");
   assert.ok(renderer.includes("onKeyDown={handleRowKeyDown}"), "the score surface must expose keyboard staff-row navigation");
   assert.ok(renderer.includes("Use Up and Down Arrow to select a staff"), "the bounded score label must explain keyboard staff selection");
   assert.doesNotMatch(renderer, /measureOrder\.indexOf\(/, "system layout must not scan the full measure order once per measure");
