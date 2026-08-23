@@ -39,13 +39,18 @@ test("server-renders the Garak notation studio", async () => {
   assert.match(html, /aria-pressed="false"[^>]*>Chord<\/button>/);
   assert.match(html, /aria-label="Remove last chord tone"[^>]*disabled/);
   assert.match(html, /aria-label="Dynamic on last event"/);
+  assert.match(html, /aria-label="Articulation on last note event"/);
   assert.match(html, /id="score-title"[^>]*maxLength="200"/);
   assert.match(html, /type="number"[^>]*min="30"[^>]*max="300"[^>]*step="1"/);
   assert.match(html, />None<\/option>/);
   for (const dynamic of ["ppp", "pp", "p", "mp", "mf", "f", "ff", "fff"]) {
     assert.match(html, new RegExp(`value="${dynamic}"`));
   }
+  for (const articulation of ["staccato", "tenuto", "accent", "marcato"]) {
+    assert.match(html, new RegExp(`value="${articulation}"`));
+  }
   assert.match(html, /Applies from this event on the selected staff until the next dynamic\./);
+  assert.match(html, /Applies to the latest note event on this staff; trailing rests are skipped\./);
   assert.match(html, /aria-label="Thirty-second note, shortcut 6"/);
   assert.match(html, /aria-label="Sixty-fourth note, shortcut 7"/);
   assert.match(html, /duration-icon duration-32[^>]*>[\s\S]*?duration-flag flag-3/);
@@ -62,12 +67,13 @@ test("server-renders the Garak notation studio", async () => {
 });
 
 test("ships product metadata and removes the disposable starter", async () => {
-  const [page, layout, packageJson, og, studio, renderer, exporters] = await Promise.all([
+  const [page, layout, packageJson, og, studio, styles, renderer, exporters] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
     readFile(new URL("../public/og.png", import.meta.url)),
     readFile(new URL("../components/NotationStudio.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
     readFile(new URL("../components/ScoreRenderer.tsx", import.meta.url), "utf8"),
     readFile(new URL("../lib/music/exporters.ts", import.meta.url), "utf8"),
   ]);
@@ -91,6 +97,8 @@ test("ships product metadata and removes the disposable starter", async () => {
   assert.ok(studio.includes("if (next) setRestMode(false);"), "chord mode must disable rest entry");
   assert.ok(studio.includes('aria-pressed={!restMode && !chordMode}'), "note mode must not appear active while chord mode is active");
   assert.ok(studio.includes("setLastEventDynamic(score, part.id, dynamic, part.staves[staffIndex].id)"));
+  assert.ok(studio.includes("setLastNoteArticulation(score, part.id, articulation, part.staves[staffIndex].id)"));
+  assert.ok(studio.includes("commit(\n      result.score,"), "articulation edits must enter the shared undo and autosave path");
   assert.ok(studio.includes("item.velocity / 127"), "live playback must consume semantic dynamic velocity");
   assert.ok(studio.includes("Math.min(.018, item.durationSeconds * .35)"), "live playback attack must fit short 32nd/64th note gates");
   assert.ok(studio.includes("Math.round(tempo || 96)"), "the UI must preserve the integer tempo contract used by MusicXML");
@@ -103,12 +111,25 @@ test("ships product metadata and removes the disposable starter", async () => {
   assert.ok(studio.includes("const targetMeasureId = findLastEventMeasureId(score, part.id, staffIndex)"));
   assert.ok(studio.includes("writtenKeyForPart(score.measures[targetMeasureId].key, part)"));
   assert.ok(studio.includes("importMusicXML(contents)"));
-  assert.ok(studio.includes("Close MusicXML import warnings"));
+  assert.ok(studio.includes("Cancel MusicXML import"));
   assert.ok(studio.includes("siblings.forEach((element) => { element.inert = true; })"), "modal background controls must become inert");
   assert.ok(studio.includes('document.addEventListener("keydown", handleDialogKey)'), "dialogs must trap Tab and handle Escape");
   assert.ok(studio.includes("previousFocus?.focus()"), "closing a dialog must restore the trigger focus");
   assert.equal((studio.match(/ref=\{activeDialogRef\} tabIndex=\{-1\}/g) ?? []).length, 4, "every modal must receive initial programmatic focus");
-  assert.ok(studio.includes("Garak kept unsupported material out of the score instead of guessing silently"));
+  assert.ok(studio.includes("Your current score is unchanged"));
+  assert.ok(studio.includes("setPendingImport({ score: parsed, warnings: imported.warnings })"), "lossy MusicXML imports must remain staged");
+  assert.ok(studio.includes("Cancel import"));
+  assert.ok(studio.includes("Open editable copy"));
+  assert.ok(studio.includes('aria-controls="score-inspector"'));
+  assert.ok(studio.includes('aria-controls="instrument-drawer"'));
+  assert.ok(studio.includes('role="group" aria-label="Export options"'));
+  assert.ok(studio.includes('tabIndex={-1} aria-hidden="true"'), "the programmatic file input must not create a duplicate tab stop");
+  assert.equal((studio.match(/aria-live="polite"/g) ?? []).length, 1, "status updates must have one live region");
+  assert.match(styles, /\.properties-panel\.drawer-open/);
+  assert.match(styles, /\.instrument-panel\.drawer-open/);
+  assert.match(styles, /\.status-warning \.status-dot/);
+  assert.match(styles, /\.status-error \.status-dot/);
+  assert.doesNotMatch(styles, /\.mode-section, \.octave-control \{ display: none; \}/);
   assert.ok(studio.includes('`Chord · ${lastEvent.notes.length} notes`'));
   assert.match(studio, /Chord mode ignored for rests/);
   assert.doesNotMatch(studio, /Chords, tuplets/);
@@ -136,7 +157,16 @@ test("ships product metadata and removes the disposable starter", async () => {
   assert.doesNotMatch(studio, /localStorage\.setItem\(/, "the UI must not bypass validation and backup rotation");
   assert.ok(renderer.includes('"d".repeat(event.duration.dots)'));
   assert.ok(renderer.includes("new TextDynamics({ duration, text: event.dynamic, line: 9 })"));
-  assert.ok(renderer.includes("durationOverride: new Fraction(fullMeasure.numerator, fullMeasure.denominator)"), "empty-meter rests and their dynamics spacer must use a whole-note fraction rather than pre-scaled ticks");
+  assert.ok(renderer.includes("new Articulation(VEXFLOW_ARTICULATION_CODES[event.articulation]).setPosition(ModifierPosition.ABOVE)"));
+  assert.ok(renderer.includes('await import("vexflow/bravura")'), "the renderer must use the audited three-font Bravura entry");
+  for (const code of ['staccato: "a."', 'tenuto: "a-"', 'accent: "a>"', 'marcato: "a^"']) {
+    assert.ok(renderer.includes(code), `the installed VexFlow articulation map must include ${code}`);
+  }
+  assert.ok(renderer.includes("new Fraction(fullMeasure.numerator, fullMeasure.denominator)"), "empty-meter rests must use a whole-note fraction rather than pre-scaled ticks");
+  assert.ok(renderer.includes("dynamicsVoice?: VexVoice"), "cells without dynamics must not allocate a spacer voice");
+  assert.ok(renderer.includes("cell.dynamicsVoice?.draw"), "optional dynamics voices must draw only when present");
+  assert.ok(renderer.includes("onKeyDown={handleRowKeyDown}"), "the score surface must expose keyboard staff-row navigation");
+  assert.ok(renderer.includes("Use Up and Down Arrow to select a staff"), "the bounded score label must explain keyboard staff selection");
   assert.doesNotMatch(renderer, /measureOrder\.indexOf\(/, "system layout must not scan the full measure order once per measure");
   assert.match(renderer, /dotIndex < event\.duration\.dots/);
   assert.ok(renderer.includes("if (atSystemStart || keyChanged)"), "key signatures render at system starts and actual change boundaries");

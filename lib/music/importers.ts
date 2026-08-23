@@ -3,6 +3,7 @@ import { INSTRUMENTS } from "./catalog";
 import { normalizeKeyFifths, transpositionFifths } from "./key-signatures";
 import type { KeySignature } from "./key-signatures";
 import type {
+  Articulation,
   Clef,
   DurationBase,
   DurationValue,
@@ -17,7 +18,7 @@ import type {
   StaffData,
   Transposition,
 } from "./model";
-import { DYNAMIC_MARKINGS, durationTicks, measureCapacity, SCORE_VALIDATION_LIMITS, TICKS_PER_QUARTER, TICKS_PER_WHOLE } from "./model";
+import { ARTICULATIONS, DYNAMIC_MARKINGS, durationTicks, measureCapacity, SCORE_VALIDATION_LIMITS, TICKS_PER_QUARTER, TICKS_PER_WHOLE } from "./model";
 
 type XmlNode = Record<string, unknown>;
 
@@ -59,6 +60,13 @@ const MAX_MATERIALIZED_NOTES = 100_000;
 const MAX_MATERIALIZED_TIES = 50_000;
 const TICK_EPSILON = 0.001;
 const SUPPORTED_DYNAMIC_MARKINGS = new Set<DynamicMarking>(DYNAMIC_MARKINGS);
+const SUPPORTED_ARTICULATIONS = new Set<Articulation>(ARTICULATIONS);
+const MUSICXML_ARTICULATION_MAP: Readonly<Record<string, Articulation | undefined>> = Object.freeze({
+  staccato: "staccato",
+  tenuto: "tenuto",
+  accent: "accent",
+  "strong-accent": "marcato",
+});
 
 interface WarningSink {
   push(message: string): void;
@@ -192,6 +200,46 @@ function directionDynamic(node: XmlNode, warnings: WarningSink, context: string)
   const placement = attribute(node, "placement")?.toLowerCase();
   if (placement && placement !== "below") {
     warnings.push(`${context}: ${placement} dynamic placement is not editable yet; the mark was normalized below the staff.`);
+  }
+  return selected;
+}
+
+/**
+ * Imports Garak's single event-level articulation from MusicXML's articulation
+ * group. Unknown group members are reported individually and skipped; if a
+ * source note carries several supported marks, the later mark wins visibly.
+ */
+function noteArticulation(node: XmlNode, warnings: WarningSink, context: string): Articulation | null {
+  const candidates: Articulation[] = [];
+  for (const notations of children(node, "notations")) {
+    for (const articulations of children(notations, "articulations")) {
+      for (const entry of content(articulations)) {
+        const name = elementName(entry);
+        if (!name) continue;
+        const mapped = MUSICXML_ARTICULATION_MAP[name];
+        if (!mapped || !SUPPORTED_ARTICULATIONS.has(mapped)) {
+          warnings.push(`${context}: unsupported articulation ${name} was skipped.`);
+          continue;
+        }
+        const placement = attribute(entry, "placement")?.toLowerCase();
+        if (placement && placement !== "above") {
+          warnings.push(`${context}: ${placement} ${name} placement is not editable yet; the articulation was normalized above the staff.`);
+        }
+        if (name === "strong-accent") {
+          const direction = attribute(entry, "type")?.toLowerCase();
+          if (direction && direction !== "up") {
+            warnings.push(`${context}: ${direction} strong-accent direction is not editable yet; the marcato was normalized upward.`);
+          }
+        }
+        candidates.push(mapped);
+      }
+    }
+  }
+  if (!candidates.length) return null;
+  const distinct = [...new Set(candidates)];
+  const selected = candidates.at(-1)!;
+  if (distinct.length > 1) {
+    warnings.push(`${context}: multiple supported articulations ${distinct.join(" and ")} target one event; the later ${selected} mark was used.`);
   }
   return selected;
 }
@@ -1068,8 +1116,10 @@ export function importMusicXML(xml: string): MusicXMLImportResult {
         }
 
         const voice = staves[staffIndex].measures[measureId].voices[0];
+        const articulation = noteArticulation(noteNode, warnings, context);
         const restNode = firstChild(noteNode, "rest");
         if (restNode) {
+          if (articulation) warnings.push(`${context}: ${articulation} on a rest cannot be represented and was skipped.`);
           if (isChordTone) {
             warnings.push(`${context}: a rest marked as a chord tone was skipped.`);
             precedingSource = { onset, duration: importedTicks, staffIndex, voiceNumber };
@@ -1152,6 +1202,12 @@ export function importMusicXML(xml: string): MusicXMLImportResult {
           if (materializedNoteCount >= MAX_MATERIALIZED_NOTES) {
             throw new Error(`The MusicXML score exceeds Garak's ${MAX_MATERIALIZED_NOTES.toLocaleString("en-US")}-note materialization safety limit.`);
           }
+          if (articulation) {
+            if (precedingEvent.articulation && precedingEvent.articulation !== articulation) {
+              warnings.push(`${context}: conflicting chord articulations ${precedingEvent.articulation} and ${articulation} target one editable event; the later ${articulation} mark was used.`);
+            }
+            precedingEvent.articulation = articulation;
+          }
           precedingEvent.notes.push(scoreNote);
           materializedNoteCount += 1;
           importedEvent = precedingEvent;
@@ -1164,6 +1220,7 @@ export function importMusicXML(xml: string): MusicXMLImportResult {
             kind: "note",
             duration: noteValue,
             notes: [scoreNote],
+            ...(articulation ? { articulation } : {}),
           };
           const dynamicKey = decorateWithPendingDynamic(event, staffIndex, voiceNumber);
           if (materializedNoteCount >= MAX_MATERIALIZED_NOTES) {

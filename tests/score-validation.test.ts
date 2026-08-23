@@ -385,6 +385,27 @@ test("note, pitch, accidental, event-kind, and rest schemas reject malformed val
   firstVoice(dynamic).events.push(dynamicEvent);
   assert.match(validateScore(dynamic).join("\n"), /invalid dynamic marking/i);
 
+  const articulation = freshScore();
+  const articulatedEvent = noteEvent("valid-articulation-event", "valid-articulation-note");
+  articulatedEvent.articulation = "marcato";
+  firstVoice(articulation).events.push(articulatedEvent);
+  assert.deepEqual(validateScore(articulation), []);
+
+  const invalidArticulation = freshScore();
+  const invalidArticulationEvent = noteEvent("bad-articulation-event", "bad-articulation-note");
+  (invalidArticulationEvent as unknown as { articulation: unknown }).articulation = "fermata";
+  firstVoice(invalidArticulation).events.push(invalidArticulationEvent);
+  assert.match(validateScore(invalidArticulation).join("\n"), /invalid articulation.*staccato.*tenuto.*accent.*marcato/i);
+
+  const articulatedRest = freshScore();
+  (firstVoice(articulatedRest).events as unknown[]).push({
+    id: "articulated-rest",
+    kind: "rest",
+    duration: { base: 4, dots: 0 },
+    articulation: "staccato",
+  });
+  assert.match(validateScore(articulatedRest).join("\n"), /rest and must not contain an articulation/i);
+
   const pitchedRest = freshScore();
   const restWithPitch = {
     id: "pitched-rest",

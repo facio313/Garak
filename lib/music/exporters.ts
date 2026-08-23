@@ -1,4 +1,4 @@
-import type { Clef, MusicEvent, PartData, ScoreDocument, VoiceData } from "./model";
+import type { Articulation, Clef, MusicEvent, PartData, ScoreDocument, VoiceData } from "./model";
 import { writtenKeyForPart } from "./key-signatures";
 import {
   DEFAULT_MIDI_VELOCITY,
@@ -17,6 +17,15 @@ const CLEFS: Record<Clef, { sign: string; line: number }> = {
   tenor: { sign: "C", line: 4 },
   percussion: { sign: "percussion", line: 3 },
 };
+
+/** Performance transforms shared by WebAudio playback and Standard MIDI export. */
+export const ARTICULATION_VELOCITY_BONUSES: Readonly<Record<Articulation, number>> = Object.freeze({
+  staccato: 0,
+  tenuto: 0,
+  accent: 14,
+  marcato: 24,
+});
+export const STACCATO_GATE_RATIO = 0.5;
 
 function xml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&apos;");
@@ -168,9 +177,30 @@ function eventToXML(
     const tieStart = tiedFrom.has(note.id);
     const tieStop = tiedTo.has(note.id);
     const accidental = note.pitch.alter === -2 ? "flat-flat" : note.pitch.alter === -1 ? "flat" : note.pitch.alter === 1 ? "sharp" : note.pitch.alter === 2 ? "double-sharp" : "natural";
+    const notations = noteNotationsToXML(event, noteIndex, tieStart, tieStop);
     return `
-        <note>${noteIndex ? "<chord/>" : ""}<pitch><step>${note.pitch.step}</step>${note.pitch.alter ? `<alter>${note.pitch.alter}</alter>` : ""}<octave>${note.pitch.octave}</octave></pitch><duration>${duration}</duration>${tieStop ? '<tie type="stop"/>' : ""}${tieStart ? '<tie type="start"/>' : ""}<voice>${voiceNumber}</voice><type>${type}</type>${dots}${note.accidentalDisplay === "force" ? `<accidental>${accidental}</accidental>` : ""}${staff}${tieStart || tieStop ? `<notations>${tieStop ? '<tied type="stop"/>' : ""}${tieStart ? '<tied type="start"/>' : ""}</notations>` : ""}</note>`;
+        <note>${noteIndex ? "<chord/>" : ""}<pitch><step>${note.pitch.step}</step>${note.pitch.alter ? `<alter>${note.pitch.alter}</alter>` : ""}<octave>${note.pitch.octave}</octave></pitch><duration>${duration}</duration>${tieStop ? '<tie type="stop"/>' : ""}${tieStart ? '<tie type="start"/>' : ""}<voice>${voiceNumber}</voice><type>${type}</type>${dots}${note.accidentalDisplay === "force" ? `<accidental>${accidental}</accidental>` : ""}${staff}${notations}</note>`;
   }).join("");
+}
+
+function musicXMLArticulation(articulation: Articulation): string {
+  if (articulation === "marcato") return '<strong-accent type="up"/>';
+  return `<${articulation}/>`;
+}
+
+function noteNotationsToXML(
+  event: Extract<MusicEvent, { kind: "note" }>,
+  noteIndex: number,
+  tieStart: boolean,
+  tieStop: boolean,
+): string {
+  const tied = `${tieStop ? '<tied type="stop"/>' : ""}${tieStart ? '<tied type="start"/>' : ""}`;
+  // Garak stores one articulation per event/chord, so emit it on the leading
+  // MusicXML note only rather than duplicating it on every chord tone.
+  const articulation = noteIndex === 0 && event.articulation
+    ? `<articulations>${musicXMLArticulation(event.articulation)}</articulations>`
+    : "";
+  return tied || articulation ? `<notations>${tied}${articulation}</notations>` : "";
 }
 
 /**
@@ -212,6 +242,7 @@ interface TimedNote {
   velocity: number;
   startTicks: number;
   durationTicks: number;
+  articulation?: Articulation;
 }
 
 interface MidiRoute {
@@ -254,13 +285,15 @@ function collectTimedNotes(score: ScoreDocument): TimedNote[] {
           const ticks = durationTicks(event.duration);
           if (event.dynamic) velocity = DYNAMIC_VELOCITIES[event.dynamic];
           if (event.kind === "note") {
+            const performedVelocity = Math.min(127, velocity + (event.articulation ? ARTICULATION_VELOCITY_BONUSES[event.articulation] : 0));
             event.notes.forEach((note) => notes.push({
               noteId: note.id,
               partId: part.id,
               midi: Math.max(0, Math.min(127, writtenToSounding(note.pitch, part.instrument.transposition))),
-              velocity,
+              velocity: performedVelocity,
               startTicks: cursor,
               durationTicks: ticks,
+              articulation: event.articulation,
             }));
           }
           cursor += ticks;
@@ -289,7 +322,9 @@ function collectTimedNotes(score: ScoreDocument): TimedNote[] {
       tail = next;
     }
   });
-  return notes.filter((note) => !merged.has(note.noteId));
+  return notes.filter((note) => !merged.has(note.noteId)).map((note) => note.articulation === "staccato"
+    ? { ...note, durationTicks: Math.max(1, Math.round(note.durationTicks * STACCATO_GATE_RATIO)) }
+    : note);
 }
 
 /**

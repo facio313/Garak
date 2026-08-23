@@ -27,18 +27,20 @@
 - 마지막에 추가한 chord tone 하나만 immutable하게 제거하며 event ID·onset·duration·voice tick을 유지하고 해당 note ID에 연결된 tie edge만 정리
 - `ppp`–`fff` 8단계 또는 None의 semantic dynamic을 선택 staff 마지막 note/rest event에 attach·replace·clear
 - VexFlow `TextDynamics`, staff별로 다음 표시까지 지속되는 Web Audio·MIDI velocity, MusicXML `<direction>` dynamic export
+- `staccato`·`tenuto`·`accent`·`marcato` 또는 None 중 하나를 선택 staff 마지막 note event에 attach·replace·clear하고 trailing rest는 건너뛰는 event-level articulation 모델·Inspector
+- VexFlow의 보표 위 articulation, staccato 50% duration·tenuto 기본 gate·accent/marcato velocity +14/+24(127 clamp)의 Web Audio/MIDI 의미, MusicXML `<articulations>` 왕복
 - 악보 행 또는 Inspector에서 스태프를 선택하고 해당 스태프에 입력·삭제·tie
 - overflow 없는 자동 마디 추가, 빈 마지막 마디 추가, 안전한 마지막 빈 마디 제거
 - keyboard/pointer 입력과 각 past/future 방향별 최대 100 snapshot·8 MiB serialized-size proxy의 bounded undo/redo
 - Web Audio playback, part mute/solo, 모든 스태프의 sounding pitch 수집, 최소 5 ms short-note gate와 시간순·동시 onset part-fair 600-note window
 - 검증된 localStorage primary와 last-known-good backup을 사용하는 autosave/recovery, backup/fresh damage recovery 뒤 명시적 Save now/New까지 autosave pause, 손상 raw·quota/write 실패 보존, Garak JSON import/export
-- uncompressed score-partwise `.musicxml`/`.xml`의 staff별 primary-voice subset import, part-list 순서와 `divisions`·`backup`·`forward` source cursor, 정확한 gap rest, chord/tie, 32nd/64th·겹점, 8단계 dynamic direction의 다음 event anchor·마디 경계 carry 보존
+- uncompressed score-partwise `.musicxml`/`.xml`의 staff별 primary-voice subset import, part-list 순서와 `divisions`·`backup`·`forward` source cursor, 정확한 gap rest, chord/tie, 32nd/64th·겹점, 8단계 dynamic direction의 다음 event anchor·마디 경계 carry 및 4개 articulation 보존
 - malformed XML·내부 DTD subset/entity 선언 거부, 67,108,864 UTF-16 code unit·256 part·part당 32/전체 512 staff·20,000 measure·10,000 staff×measure cell·100,000 source element와 50,000 event/100,000 note/50,000 tie importer 상한, materialization 전 536,870,910 native tick 누적 timeline preflight
 - `implicit="yes"`/non-final underfill 시간축 변화와 noncontiguous tie skip을 위치 기반 warning으로 공개하고, warning을 200개×500 code unit과 optional omission summary로 제한
 - 긴 외부 source ID를 compact internal ID에 증폭하지 않고, opaque native part ID를 유일하고 참조 일관적인 안전한 MusicXML ID로 mapping
-- 실제 key/time boundary, written key, dynamic direction과 multi-staff/clef/voice/staff/backup을 보존하는 MusicXML 4.0 export
+- 실제 key/time boundary, written key, dynamic direction, 단일 event-level articulation과 multi-staff/clef/voice/staff/backup을 보존하는 MusicXML 4.0 export
 - percussion clef만 GM channel 10을 사용하고 pitched percussion은 melodic으로 분류하는 MusicXML/SMF 멀티 포트 routing; port마다 melodic route 15개, pitched 240개·독립 unpitched 16개 상한과 초과 오류, [MusicXML `<midi-device>`](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/midi-device/) 1-based port와 SMF `FF 21` 0-based port 대응
-- 실제 time-signature boundary, staff별 dynamic velocity, 모든 스태프를 반영하는 SMF MIDI export; VLQ 상한, 960→480 PPQ 반올림, same-port/channel/pitch overlap merge compromise를 명시
+- 실제 time-signature boundary, staff별 dynamic과 articulation velocity·staccato duration, 모든 스태프를 반영하는 SMF MIDI export; VLQ 상한, 960→480 PPQ 반올림, same-port/channel/pitch overlap merge compromise를 명시
 - print/PDF, 반응형 shell, 55–150% zoom, visible focus, reduced motion, dialog initial focus·background `inert`·Tab trap·Escape·focus restore
 - preset 밖의 유효한 imported meter를 Inspector에 exact value와 `imported/custom`으로 표시
 - 음악 도메인·MusicXML import·서버 렌더 회귀와 typecheck, lint, production build; 정확한 테스트 개수와 통과 상태는 최신 명령 출력 기준
@@ -55,11 +57,12 @@ Native validator의 현재 hard ceiling은 ordered measure 20,000, part 256, 전
 - Chord mode는 마지막 note event에 pitch를 추가하고 마지막에 추가한 tone을 제거할 수 있지만, 임의 notehead 선택·수정·삭제·개별 tie와 chord symbol은 미지원
 - Key/time range command는 선택 마디부터 다음 기존 change boundary 직전까지만 바꾸고 resulting score가 invalid이면 원자 거부하며, overflow 음악을 재배치하는 rebar, pickup, custom meter/beam grouping은 미지원
 - Dynamics 편집은 선택 staff의 시간상 마지막 event만 대상으로 하며, import도 8단계 MusicXML dynamic direction subset만 지원합니다. Hairpin/wedge, `sfz`·other/sound-only dynamic, composite 원형 의미, direction offset 보존, 임의 event 선택은 미지원
+- Articulation 편집은 선택 staff의 마지막 note event와 event/chord당 단일 mark만 대상으로 합니다. 복수 mark 조합·placement/direction 편집·임의 event 선택, slur·breath·fermata·ornament는 미지원입니다. MusicXML의 겹치는 지원 mark는 warning과 함께 마지막 값으로 정규화하고, `<fermata>`와 `<ornaments>`는 현재 articulation importer가 보존하지 않습니다.
 - grand staff와 Organ 3 staff는 지원하지만 각 staff의 primary voice만 편집·export
 - 마지막 이벤트 기반 입력·삭제이며 stable caret/range selection과 copy/paste는 미지원
 - percussion preset은 있으나 note map editor 없음
 - 기본 oscillator playback이며 전문 orchestral sample이 아님
-- MusicXML import는 uncompressed score-partwise `.musicxml`/`.xml`의 staff별 primary voice와 8단계 dynamic direction subset만 편집 모델로 보존; `.mxl`, multiple voices, semantic tuplets, 나머지 directions/expressions, repeats, layout round-trip과 parser depth/node budget은 미지원
+- MusicXML import는 uncompressed score-partwise `.musicxml`/`.xml`의 staff별 primary voice, 8단계 dynamic direction과 4개 단일 articulation subset만 편집 모델로 보존; `.mxl`, multiple voices, semantic tuplets, fermata·ornaments·slur와 나머지 directions/expressions, repeats, layout round-trip과 parser depth/node budget은 미지원
 - 현재 하나의 SVG에 동적 multi-system 화면 layout만 있으며 page 단위 자동/수동 break, collision avoidance, viewport virtualization, linked-part layout override 없음
 - primary + last-known-good backup 복구가 있는 local device 단일 draft만 지원하며 IndexedDB, score library, account, cloud collaboration은 없음
 
@@ -125,16 +128,19 @@ Native validator의 현재 hard ceiling은 ordered measure 20,000, part 256, 전
 
 비교 기준: [MuseScore tuplets](https://handbook.musescore.org/notation/rhythm-meter-and-measures/tuplets), [Finale Tuplets](https://usermanuals.finalemusic.com/FinaleWin/Content/Finale/Tuplets.htm).
 
-### 6. Expressions — semantic dynamics subset 지원
+### 6. Expressions와 articulations — semantic subset 지원
 
 현재 `ppp`, `pp`, `p`, `mp`, `mf`, `f`, `ff`, `fff` 또는 None은 선택 staff의 시간상 마지막 note/rest event에 semantic value로 attach·replace·clear할 수 있습니다. SVG는 `TextDynamics`를 사용하고, playback과 MIDI는 해당 staff에서 다음 dynamic까지 velocity를 지속하며, MusicXML은 staff·voice가 있는 `<direction>`과 `<sound dynamics>`로 export합니다. Uncompressed score-partwise import는 같은 8단계 `<direction-type><dynamics>`를 지정 staff·선택 primary voice의 다음 표현 가능한 event에 붙이고 마디 경계를 넘어 carry합니다. Offset은 cursor를 움직이지 않고 무시해 warning을 내며 above placement는 below로 정규화해 warning을 냅니다.
+
+현재 articulation은 `staccato`, `tenuto`, `accent`, `marcato` 또는 None 중 하나를 선택 staff의 마지막 note event에 attach·replace·clear합니다. Trailing rest는 건너뛰고 chord의 모든 tone은 event-level mark 하나를 공유합니다. VexFlow는 mark를 보표 위에 사보합니다. Playback/MIDI는 staccato를 원 duration의 50%로 줄이고, tenuto는 현재 기본 gate를 유지하며, accent/marcato는 지속 dynamic velocity에 각각 14/24를 더해 127에서 제한합니다. MusicXML은 staccato/tenuto/accent와 upward `<strong-accent>`를 leading chord note의 `<articulations>`로 왕복하고 tie와 같은 `<notations>`에 병합합니다. Below/down placement와 서로 다른 여러 지원 mark는 warning과 함께 above/up 및 source 순서상 마지막 mark로 정규화합니다.
 
 남은 P0 acceptance는 다음과 같습니다.
 
 - 임의 event 또는 staff/system time position을 선택해 dynamic을 이동·삭제하고 rebar/reflow 뒤 anchor 보존
 - Imported direction의 editable offset·placement 보존과 임의 event/time-position 재지정
 - hairpin/wedge span, `sfz`·other dynamic과 composite 원형 의미, hairpin interpolation을 semantic하게 저장·사보·재생
-- articulation, expression text, tempo text, rehearsal mark를 semantic subtype으로 추가
+- 임의 event articulation 선택·이동, 여러 mark 조합, placement/direction 보존과 collision 정책
+- slur·breath·fermata·ornaments, expression text, tempo text, rehearsal mark를 서로 다른 semantic subtype으로 추가
 - keyboard/palette 입력, selection·undo, 총보/파트 보존과 기본 collision avoidance
 
 비교 기준: [MuseScore expressive markings](https://handbook.musescore.org/notation/expressive-markings), [MuseScore dynamics와 hairpins](https://handbook.musescore.org/notation/expressive-markings/dynamics), [Finale Expressions](https://usermanuals.finalemusic.com/FinaleWin/Content/Finale/Expressions.htm).
@@ -161,14 +167,14 @@ Native validator의 현재 hard ceiling은 ordered measure 20,000, part 256, 전
 
 ### 9. MusicXML import — uncompressed primary-voice subset 지원, round-trip 확장
 
-현재는 file chooser에서 uncompressed score-partwise `.musicxml`/`.xml`을 열어 metadata, 첫 유효한 30–300 BPM global tempo, part/instrument, multi-staff, clef/key/time, staff별 선택 primary-voice note/rest/chord/tie와 32nd/64th·겹점을 편집·재생·재-export할 수 있습니다. Voice 1을 우선하고 없으면 처음 나타난 voice 하나만 선택합니다. 지원되는 8단계 dynamic direction은 staff·선택 primary voice의 다음 표현 가능한 event에 붙고, pending mark는 마디 경계를 넘어 carry합니다. Part-list 순서와 measure source cursor를 따르며 `divisions` 변경, `backup`, `forward`를 반영하고, 표현 가능한 leading gap은 정확한 rest로 materialize합니다. Overlap·마디 초과·표현 불가능 duration·선택되지 않은 voice는 조용히 재배치하지 않고 score 위치가 포함된 warning으로 보고합니다. `implicit="yes"`와 non-final underfill로 pickup/source timeline을 보존하지 못하는 경우 지연 tick을 공개하며, 정규화 뒤 noncontiguous가 된 tie는 건너뜁니다.
+현재는 file chooser에서 uncompressed score-partwise `.musicxml`/`.xml`을 열어 metadata, 첫 유효한 30–300 BPM global tempo, part/instrument, multi-staff, clef/key/time, staff별 선택 primary-voice note/rest/chord/tie와 32nd/64th·겹점을 편집·재생·재-export할 수 있습니다. Voice 1을 우선하고 없으면 처음 나타난 voice 하나만 선택합니다. 지원되는 8단계 dynamic direction은 staff·선택 primary voice의 다음 표현 가능한 event에 붙고, pending mark는 마디 경계를 넘어 carry합니다. Staccato, tenuto, accent, strong-accent→marcato는 단일 event-level articulation으로 import합니다. 미지원 `<articulations>` member와 rest articulation은 warning 후 건너뛰고, placement/direction과 복수/chord 충돌은 warning 정규화합니다. Fermata와 ornaments는 이 articulation group 밖의 별도 의미이며 현재 모델과 importer가 보존하지 않습니다. Part-list 순서와 measure source cursor를 따르며 `divisions` 변경, `backup`, `forward`를 반영하고, 표현 가능한 leading gap은 정확한 rest로 materialize합니다. Overlap·마디 초과·표현 불가능 duration·선택되지 않은 voice는 조용히 재배치하지 않고 score 위치가 포함된 warning으로 보고합니다. `implicit="yes"`와 non-final underfill로 pickup/source timeline을 보존하지 못하는 경우 지연 tick을 공개하며, 정규화 뒤 noncontiguous가 된 tie는 건너뜁니다.
 
 보안·리소스 경계로 malformed XML과 내부 DTD subset/entity 선언을 거부합니다. UI file chooser는 10 MiB입니다. Importer core 상한은 67,108,864 UTF-16 code unit, part 256, part당 staff 32, 전체 staff 512, measure 20,000, staff×measure cell 10,000, source measure child element 100,000, materialized event 50,000/note 100,000/tie 50,000입니다. 누적 full-meter capacity도 materialization 전에 계산해 native absolute timeline 상한 536,870,910 tick을 넘으면 거부합니다. Source ID 256, imported name 200, short name 80, rights 500 code unit 제한을 적용하고 긴 source ID를 descendant ID에 복사하지 않습니다. Warning은 중복 제거된 visible 200개, 각 500 code unit과 optional omission summary로 UI를 제한합니다. Part-list/document의 누락·중복·깨진 reference와 안전하지 않은 duration도 오류 또는 warning으로 처리합니다.
 
 남은 P0 acceptance는 다음과 같습니다.
 
 - compressed `.mxl`과 zip size/file-count/path/depth/uncompressed-size 제한
-- multiple voices, tuplets, 8단계 dynamic subset 밖의 directions/expressions, repeats, system/page break와 layout intent
+- multiple voices, tuplets, 8단계 dynamic과 4개 articulation subset 밖의 directions/notations(fermata·ornaments·slur 포함), repeats, system/page break와 layout intent
 - 이미 차단한 내부 DTD/entity의 변형 회귀에 더해 external DTD system/public identifier, parser depth/node budget, entity expansion·numeric fuzz corpus
 - warning에 element type과 score 위치를 일관되게 기록
 - import→export→import 후 pitch/onset/duration/staff/voice/tie/tuplet/repeat 의미 동일
@@ -201,7 +207,7 @@ Native validator의 현재 hard ceiling은 ordered measure 20,000, part 256, 전
 - lazy-loaded sample fallback와 polyphony cap
 - score composite keyboard navigation, part/staff/measure/beat/voice/event announcement
 - high contrast, 200% zoom, reduced motion, VoiceOver/NVDA 수동 시나리오
-- 확인된 production font payload 6개의 완전한 license text를 사용자가 접근 가능한 Licenses surface에 제공하고, 향후 self-hosted SMuFL 1.4 Bravura와 SVG/PDF/PNG 출력 검증
+- `vexflow/bravura` release build에 포함되는 Academico Regular/Bold·Bravura 3개 font payload의 완전한 OFL·copyright notice를 사용자가 접근 가능한 Licenses surface에 제공하고, 향후 다른 SMuFL font 채택 시 artifact/license 감사 재개
 
 ### P0 합격 기준
 

@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { FAMILIES, FAMILY_COLORS, INSTRUMENTS, SCORE_TEMPLATES, getInstrument } from "../lib/music/catalog";
 import { keySignaturesEqual, resolveMeasureAccidentals, timeSignaturesEqual } from "../lib/music/engraving";
-import { collectPlaybackNotes, encodeMidiVariableLength, scoreToMidi, scoreToMusicXML, selectPlaybackWindow } from "../lib/music/exporters";
+import { ARTICULATION_VELOCITY_BONUSES, collectPlaybackNotes, encodeMidiVariableLength, scoreToMidi, scoreToMusicXML, selectPlaybackWindow, STACCATO_GATE_RATIO } from "../lib/music/exporters";
 import { KEY_SIGNATURES, concertToWrittenKey, createWrittenKeySignatureSnapshot, fifthsToVexFlowKey, keySignatureAlterForStep, keySignatureName, writtenKeyForPart } from "../lib/music/key-signatures";
 import { getDefaultBeamGroups, getFullMeasureDuration } from "../lib/music/meter";
-import { DEFAULT_MIDI_VELOCITY, DURATION_LABELS, DYNAMIC_MARKINGS, DYNAMIC_VELOCITIES, TICKS_PER_QUARTER, durationTicks, eventCount, getPrimaryVoice, measureCapacity, nextAugmentationDotCount, validateScore, voiceTicks, writtenToSounding } from "../lib/music/model";
+import { ARTICULATIONS, DEFAULT_MIDI_VELOCITY, DURATION_LABELS, DYNAMIC_MARKINGS, DYNAMIC_VELOCITIES, TICKS_PER_QUARTER, durationTicks, eventCount, getPrimaryVoice, measureCapacity, nextAugmentationDotCount, validateScore, voiceTicks, writtenToSounding } from "../lib/music/model";
 import type { MusicEvent, Pitch, ScoreDocument, ScoreNote } from "../lib/music/model";
-import { addChordTone, addInstrument, appendEvent, appendMeasure, createScore, findEventTargetMeasureId, makeEvent, removeInstrument, removeLastChordTone, removeLastEvent, removeLastMeasure, setKeyFromMeasure, setLastEventDynamic, setMeasureKey, setScoreKey, setTimeFromMeasure, toggleTieLastTwo } from "../lib/music/score";
+import { addChordTone, addInstrument, appendEvent, appendMeasure, createScore, findEventTargetMeasureId, makeEvent, removeInstrument, removeLastChordTone, removeLastEvent, removeLastMeasure, setKeyFromMeasure, setLastEventDynamic, setLastNoteArticulation, setMeasureKey, setScoreKey, setTimeFromMeasure, toggleTieLastTwo } from "../lib/music/score";
 
 test("duration and meter arithmetic stays exact", () => {
   assert.equal(durationTicks({ base: 1, dots: 0 }), TICKS_PER_QUARTER * 4);
@@ -1231,6 +1231,142 @@ test("semantic dynamics attach immutably to the latest selected-staff event with
   assert.equal(missing.score, empty);
   if (!missing.error) assert.fail("Expected the empty-staff dynamic guard.");
   assert.match(missing.error, /note or rest before adding a dynamic/i);
+});
+
+test("articulations attach immutably to the latest selected-staff note while skipping trailing rests", () => {
+  assert.deepEqual(ARTICULATIONS, ["staccato", "tenuto", "accent", "marcato"]);
+  const source = createScore("solo", { seedDemo: false });
+  const part = source.parts[0];
+  const staffId = part.staves[1].id;
+  const noteMeasureId = source.measureOrder[1];
+  const restMeasureId = source.measureOrder[2];
+  const note = makeEvent({
+    id: "articulation-note",
+    pitch: { step: "C", alter: 0, octave: 3 },
+    duration: { base: 8, dots: 1 },
+    rest: false,
+  });
+  getPrimaryVoice(part, noteMeasureId, 1).events.push(note);
+  getPrimaryVoice(part, restMeasureId, 1).events.push(makeEvent({
+    id: "trailing-rest",
+    pitch: { step: "C", alter: 0, octave: 3 },
+    duration: { base: 4, dots: 0 },
+    rest: true,
+  }));
+  const snapshot = structuredClone(source);
+  const ticksBefore = voiceTicks(getPrimaryVoice(part, noteMeasureId, 1));
+
+  const attached = setLastNoteArticulation(source, part.id, "staccato", staffId);
+  assert.equal(attached.error, undefined);
+  assert.equal(attached.changed, true);
+  assert.equal(attached.measureId, noteMeasureId);
+  assert.equal(attached.eventId, "articulation-note");
+  assert.equal(attached.previousArticulation, null);
+  assert.notEqual(attached.score, source);
+  assert.deepEqual(source, snapshot, "the command must preserve the undo snapshot");
+  const attachedNote = getPrimaryVoice(attached.score.parts[0], noteMeasureId, 1).events[0];
+  const trailingRest = getPrimaryVoice(attached.score.parts[0], restMeasureId, 1).events[0];
+  assert.equal(attachedNote.kind, "note");
+  if (attachedNote.kind !== "note") assert.fail("Expected an articulated note.");
+  assert.equal(attachedNote.articulation, "staccato");
+  assert.equal(Object.hasOwn(trailingRest, "articulation"), false);
+  assert.equal(voiceTicks(getPrimaryVoice(attached.score.parts[0], noteMeasureId, 1)), ticksBefore);
+
+  const replaced = setLastNoteArticulation(attached.score, part.id, "marcato", 1);
+  assert.equal(replaced.error, undefined);
+  assert.equal(replaced.changed, true);
+  assert.equal(replaced.previousArticulation, "staccato");
+  const replacedNote = getPrimaryVoice(replaced.score.parts[0], noteMeasureId, 1).events[0];
+  if (replacedNote.kind !== "note") assert.fail("Expected an articulated note.");
+  assert.equal(replacedNote.articulation, "marcato");
+
+  const unchanged = setLastNoteArticulation(replaced.score, part.id, "marcato", staffId);
+  assert.equal(unchanged.changed, false);
+  assert.equal(unchanged.score, replaced.score, "a no-op must not create an undo snapshot");
+
+  const cleared = setLastNoteArticulation(replaced.score, part.id, null, staffId);
+  assert.equal(cleared.error, undefined);
+  assert.equal(cleared.changed, true);
+  const clearedNote = getPrimaryVoice(cleared.score.parts[0], noteMeasureId, 1).events[0];
+  assert.equal(Object.hasOwn(clearedNote, "articulation"), false);
+  assert.deepEqual(validateScore(JSON.parse(JSON.stringify(cleared.score))), []);
+
+  const empty = createScore("solo", { seedDemo: false });
+  const missing = setLastNoteArticulation(empty, empty.parts[0].id, "accent", empty.parts[0].staves[1].id);
+  assert.equal(missing.changed, false);
+  assert.equal(missing.score, empty);
+  assert.match(missing.error ?? "", /note before adding an articulation/i);
+
+  const invalid = setLastNoteArticulation(source, part.id, "fermata" as never, staffId);
+  assert.equal(invalid.changed, false);
+  assert.equal(invalid.score, source);
+  assert.match(invalid.error ?? "", /staccato.*tenuto.*accent.*marcato/i);
+});
+
+test("articulation performance, MIDI, and MusicXML share bounded semantics", () => {
+  assert.equal(STACCATO_GATE_RATIO, 0.5);
+  assert.deepEqual(ARTICULATION_VELOCITY_BONUSES, { staccato: 0, tenuto: 0, accent: 14, marcato: 24 });
+  const score = createScore("solo", { seedDemo: false });
+  const voice = getPrimaryVoice(score.parts[0], score.measureOrder[0]);
+  const normal = makeEvent({ id: "art-normal", pitch: { step: "C", alter: 0, octave: 4 }, duration: { base: 8, dots: 0 }, rest: false });
+  const staccato = makeEvent({ id: "art-staccato", pitch: { step: "D", alter: 0, octave: 4 }, duration: { base: 8, dots: 0 }, rest: false });
+  const tenuto = makeEvent({ id: "art-tenuto", pitch: { step: "E", alter: 0, octave: 4 }, duration: { base: 8, dots: 0 }, rest: false });
+  const accent = makeEvent({ id: "art-accent", pitch: { step: "F", alter: 0, octave: 4 }, duration: { base: 8, dots: 0 }, rest: false });
+  const marcato = makeEvent({ id: "art-marcato", pitch: { step: "G", alter: 0, octave: 4 }, duration: { base: 8, dots: 0 }, rest: false });
+  if (staccato.kind !== "note" || tenuto.kind !== "note" || accent.kind !== "note" || marcato.kind !== "note") assert.fail("Expected note events.");
+  staccato.articulation = "staccato";
+  tenuto.articulation = "tenuto";
+  accent.articulation = "accent";
+  marcato.articulation = "marcato";
+  marcato.dynamic = "fff";
+  voice.events.push(normal, staccato, tenuto, accent, marcato);
+  assert.deepEqual(validateScore(score), []);
+
+  const playback = new Map(collectPlaybackNotes(score).map((item) => [item.midi, item]));
+  const normalPlayback = playback.get(60)!;
+  assert.equal(playback.get(62)!.durationSeconds, normalPlayback.durationSeconds * STACCATO_GATE_RATIO);
+  assert.equal(playback.get(64)!.durationSeconds, normalPlayback.durationSeconds, "tenuto retains the normal Garak gate");
+  assert.equal(playback.get(65)!.velocity, DEFAULT_MIDI_VELOCITY + ARTICULATION_VELOCITY_BONUSES.accent);
+  assert.equal(playback.get(67)!.velocity, 127, "marcato velocity is clamped to MIDI's maximum");
+
+  const midi = [...scoreToMidi(score)];
+  const contains = (needle: number[]) => midi.some((_, index) => needle.every((byte, offset) => midi[index + offset] === byte));
+  assert.ok(contains([0x90, 65, DEFAULT_MIDI_VELOCITY + ARTICULATION_VELOCITY_BONUSES.accent]));
+  assert.ok(contains([0x90, 67, 127]));
+
+  const xml = scoreToMusicXML(score);
+  assert.match(xml, /<articulations><staccato\/><\/articulations>/);
+  assert.match(xml, /<articulations><tenuto\/><\/articulations>/);
+  assert.match(xml, /<articulations><accent\/><\/articulations>/);
+  assert.match(xml, /<articulations><strong-accent type="up"\/><\/articulations>/);
+});
+
+test("VexFlow 5 articulation modifiers preserve StaveNote ticks", async () => {
+  const { Articulation, ModifierPosition, StaveNote } = await import("vexflow");
+  const codes = ["a.", "a-", "a>", "a^"];
+  for (const code of codes) {
+    const note = new StaveNote({ keys: ["c/4"], duration: "q" });
+    const ticksBefore = note.getTicks().value();
+    note.addModifier(new Articulation(code).setPosition(ModifierPosition.ABOVE), 0);
+    assert.equal(note.getTicks().value(), ticksBefore, `${code} must be a zero-duration engraving modifier`);
+  }
+});
+
+test("MusicXML merges articulation and tie data in one notations element", () => {
+  const score = createScore("solo", { seedDemo: false });
+  const voice = getPrimaryVoice(score.parts[0], score.measureOrder[0]);
+  const first = makeEvent({ id: "art-tie-first", pitch: { step: "C", alter: 0, octave: 4 }, duration: { base: 4, dots: 0 }, rest: false });
+  const second = makeEvent({ id: "art-tie-second", pitch: { step: "C", alter: 0, octave: 4 }, duration: { base: 4, dots: 0 }, rest: false });
+  if (first.kind !== "note") assert.fail("Expected a note event.");
+  first.articulation = "accent";
+  first.notes.push({ id: "art-tie-chord-tone", pitch: { step: "E", alter: 0, octave: 4 }, accidentalDisplay: "auto" });
+  voice.events.push(first, second);
+  const tied = toggleTieLastTwo(score, score.parts[0].id);
+  assert.equal(tied.error, undefined);
+  const xml = scoreToMusicXML(tied.score);
+  assert.match(xml, /<notations><tied type="start"\/><articulations><accent\/><\/articulations><\/notations>/);
+  assert.equal((xml.match(/<articulations>/g) ?? []).length, 1, "one event-level articulation is emitted only on the leading chord note");
+  assert.doesNotMatch(xml, /<\/notations>\s*<notations>/, "a note never receives sibling notations containers");
 });
 
 test("dynamic marks propagate independently per staff through playback, MIDI velocity, and MusicXML directions", () => {

@@ -20,6 +20,8 @@ Garak은 브라우저에서 솔로, 앙상블, 오케스트라 악보를 빠르�
 - 30–300 범위의 정수 global tempo 편집과 MusicXML initial tempo import/export 왕복
 - `ppp`–`fff` 8단계 semantic dynamic을 선택 staff의 마지막 note/rest event에 attach·replace·clear하고 VexFlow `TextDynamics`로 사보
 - Dynamic이 다음 표시까지 staff별로 지속되는 Web Audio·MIDI velocity와 MusicXML `<direction>` export
+- `staccato`, `tenuto`, `accent`, `marcato` 중 하나 또는 None을 선택 staff의 마지막 note event에 attach·replace·clear하고, trailing rest를 건너뛰어 VexFlow mark를 보표 위에 사보
+- 같은 articulation 값을 Web Audio·MIDI 연주와 MusicXML `<articulations>` import/export에 연결: staccato는 길이 50%, tenuto는 현재 기본 gate 유지, accent/marcato는 velocity +14/+24(최대 127)
 - meter에 맞는 기본 beam group, 5/8·7/8 같은 meter도 whole-note fraction으로 정확히 보존하는 중앙 정렬 full-measure rest
 - 음표 수, 점, 임시표, 조표·박자표 폭과 viewport를 반영하고 measure ID→index map으로 반복 `indexOf` 조회를 없앤 동적 마디 간격 및 system 줄바꿈
 - 마지막에 빈 마디 추가, 비어 있고 tie가 연결되지 않은 마지막 마디 제거, 마디가 가득 차면 자동 추가
@@ -28,9 +30,9 @@ Garak은 브라우저에서 솔로, 앙상블, 오케스트라 악보를 빠르�
 - 총보와 선택 파트 보기 전환, grand staff brace와 악기군 bracket
 - 파트별 mute/solo와 written→sounding pitch를 반영하고 짧은 음의 gate를 보존하는 전체 스태프 Web Audio 재생; 한 번에 600음까지 시간순·동시 onset의 part 간 공정 선택
 - versioned Garak JSON의 검증된 primary + last-known-good backup 자동 저장, primary 손상 시 backup 복구와 명시적 Save now/New 전 autosave 일시정지, corruption·quota/write 실패 status, 파일 다운로드·업로드
-- uncompressed score-partwise `.musicxml`/`.xml`의 staff별 primary-voice subset import, source `divisions`·`backup`·`forward` 시간축과 정확한 gap rest, 8단계 dynamic direction의 다음 event anchor·마디 경계 carry 보존, 미지원 요소 warning modal
+- uncompressed score-partwise `.musicxml`/`.xml`의 staff별 primary-voice subset import, source `divisions`·`backup`·`forward` 시간축과 정확한 gap rest, 8단계 dynamic direction의 다음 event anchor·마디 경계 carry 및 4개 articulation subset 보존, 미지원 요소 warning modal
 - MusicXML import의 well-formedness·내부 DTD/entity 차단과 XML 길이·part·staff·measure 리소스 상한
-- key/time과 dynamic 경계를 보존하는 멀티 스태프 MusicXML 4.0, meter change·dynamic velocity·멀티 포트 악기 routing을 보존하는 전체 스태프 Standard MIDI File, 인쇄/PDF 내보내기
+- key/time·dynamic과 단일 event-level articulation을 보존하는 멀티 스태프 MusicXML 4.0, meter change·dynamic/articulation velocity·staccato gate·멀티 포트 악기 routing을 보존하는 전체 스태프 Standard MIDI File, 인쇄/PDF 내보내기
 - 마디 수가 늘어날수록 동적으로 여러 system으로 이어지는 악보
 - 55–150% zoom, 데스크톱·축소 화면·인쇄 전용 레이아웃
 - modal을 열 때 dialog focus, 배경 `inert`, Tab focus trap, Escape 닫기와 이전 focus 복원
@@ -124,13 +126,17 @@ Tempo는 schema와 UI 모두 정수 30–300 BPM입니다. MusicXML importer는 
 
 Dynamics는 `ppp`, `pp`, `p`, `mp`, `mf`, `f`, `ff`, `fff` 또는 None을 선택 staff의 시간상 마지막 note/rest event에만 attach·replace·clear하는 subset입니다. SVG, staff별 지속 playback/MIDI velocity, MusicXML direction export를 지원합니다. Uncompressed score-partwise MusicXML import는 같은 8단계 `<direction-type><dynamics>`를 지정 staff·선택 primary voice의 다음 표현 가능한 note/rest event에 붙이고 마디를 넘어 carry합니다. Direction offset은 cursor를 움직이지 않고 무시하며 warning을 내고, above placement는 below로 정규화해 warning을 냅니다. Hairpin/wedge, `sfz`·other dynamic, sound-only dynamic, 비선택 voice, words/other direction과 임의 event 선택은 아직 지원하지 않습니다. 지원 mark가 여러 개인 composite는 원형을 보존하지 않고 warning과 함께 마지막 mark로 정규화합니다.
 
-MusicXML import는 uncompressed score-partwise `.musicxml`/`.xml`에서 part-list 순서, measure별 `divisions`, `backup`/`forward`, staff별 선택 primary voice, chord/tie, 32·64분음표와 겹점, 위 8단계 dynamic direction subset을 처리합니다. 표현 가능한 시간축 gap은 rest로 채우고 overlap·마디 초과·표현 불가능 duration은 위치가 포함된 warning과 함께 건너뜁니다. `implicit="yes"`는 pickup metadata를 보존하지 못하고 explicit measure로 export된다고 알리며, 마지막이 아닌 underfilled source measure는 full active meter로 확장되어 다음 마디가 늦어지는 tick 차이를 알립니다. Warning은 중복 제거된 200개(각 500 UTF-16 code unit 이하)와 필요할 때 omission summary 1개로 제한합니다.
+Articulation은 `staccato`, `tenuto`, `accent`, `marcato` 또는 None 중 정확히 하나를 note event에 저장하는 subset입니다. Inspector는 선택 staff의 마지막 note event를 대상으로 하므로 뒤에 rest가 있어도 그 앞 note를 찾아 attach·replace·clear하며, rest에는 articulation을 저장하지 않습니다. Chord의 모든 tone은 event articulation 하나를 공유합니다. SVG는 VexFlow의 `a.`, `a-`, `a>`, `a^` modifier를 보표 위에 그립니다. Playback과 MIDI는 staccato duration을 50%로 줄이고, tenuto는 현재 기본 duration을 유지하며, accent와 marcato는 현재 dynamic velocity에 각각 14와 24를 더해 127에서 제한합니다. 이는 임의 event 선택, 복수 articulation 조합, 악보상의 placement/direction 편집, slur·breath·fermata·ornament까지 지원한다는 뜻이 아닙니다.
+
+MusicXML export는 staccato/tenuto/accent를 같은 이름으로, marcato를 `<strong-accent type="up"/>`으로 leading chord note의 단일 `<notations><articulations>`에 기록하고 tie notation이 있으면 같은 `<notations>` 안에 합칩니다. Import는 이 네 표식을 event-level 값으로 읽습니다. Below placement는 above로, downward strong-accent는 upward marcato로 warning 정규화합니다. 한 articulation group이나 chord tone들에 서로 다른 지원 표식이 겹치면 원형 조합을 보존하지 않고 warning과 함께 source 순서상 마지막 값을 사용하며, rest의 표식과 `breath-mark` 같은 미지원 `<articulations>` member는 warning 후 건너뜁니다. `<fermata>`와 `<ornaments>`는 MusicXML에서 `<articulations>`의 sibling 계열이고 현재 이 slice의 모델·편집·사보·연주·왕복 대상이 아니므로 보존되지 않습니다.
+
+MusicXML import는 uncompressed score-partwise `.musicxml`/`.xml`에서 part-list 순서, measure별 `divisions`, `backup`/`forward`, staff별 선택 primary voice, chord/tie, 32·64분음표와 겹점, 위 8단계 dynamic direction 및 4개 articulation subset을 처리합니다. 표현 가능한 시간축 gap은 rest로 채우고 overlap·마디 초과·표현 불가능 duration은 위치가 포함된 warning과 함께 건너뜁니다. `implicit="yes"`는 pickup metadata를 보존하지 못하고 explicit measure로 export된다고 알리며, 마지막이 아닌 underfilled source measure는 full active meter로 확장되어 다음 마디가 늦어지는 tick 차이를 알립니다. Warning은 중복 제거된 200개(각 500 UTF-16 code unit 이하)와 필요할 때 omission summary 1개로 제한합니다.
 
 UI file chooser는 10 MiB, importer core는 67,108,864 UTF-16 code unit, 256 part, part당 32 staff, 전체 512 staff, 20,000 measure, 10,000 staff×measure cell, source measure child element 100,000개를 상한으로 둡니다. Materialize 결과도 event 50,000개, note 100,000개, tie 50,000개를 넘지 못하며, 누적 full-meter timeline은 materialization 전에 native 상한 536,870,910 tick을 preflight합니다. 외부 source ID는 256 code unit으로 제한하고 내부 descendant ID에는 복제하지 않으며, MusicXML export는 opaque part ID를 유일하고 참조가 일치하는 안전한 XML ID로 바꿉니다. Native validator도 ordered measure 20,000, part 256, 전체 staff 512, staff×measure cell/voice 10,000, event 50,000, note 100,000, tie 50,000 및 absolute timeline 536,870,910 tick을 상한으로 둡니다. 첫 200개 validation error 뒤에는 omission summary만 반환합니다.
 
-Malformed XML과 내부 DTD subset/entity 선언은 거부합니다. `.mxl`, multiple voices의 동시 편집, semantic tuplets, dynamic subset 밖의 directions/expressions, repeats, layout round-trip과 parser depth/node budget은 아직 지원하지 않습니다. 작곡 기능에서도 stable caret/range selection, copy/paste, grace note, articulation·hairpin·임의 expression, repeat/volta/jump, linked-part 전용 layout, 전문 pagination/virtualization, percussion map editor, 고품질 오케스트라 음원, 클라우드 협업이 남아 있습니다. 구현되지 않은 기능을 작동하는 것처럼 표시하지 않습니다.
+Malformed XML과 내부 DTD subset/entity 선언은 거부합니다. `.mxl`, multiple voices의 동시 편집, semantic tuplets, articulation subset 밖의 fermata·ornaments·slur와 dynamic subset 밖의 directions/expressions, repeats, layout round-trip과 parser depth/node budget은 아직 지원하지 않습니다. 작곡 기능에서도 stable caret/range selection, copy/paste, grace note, 복수 articulation·placement 편집·hairpin·임의 expression, repeat/volta/jump, linked-part 전용 layout, 전문 pagination/virtualization, percussion map editor, 고품질 오케스트라 음원, 클라우드 협업이 남아 있습니다. 구현되지 않은 기능을 작동하는 것처럼 표시하지 않습니다.
 
-Live playback은 note duration의 90%를 gate로 쓰되 최소 5 ms를 보장하고 attack을 18 ms 또는 duration의 35% 중 작은 값으로 제한합니다. 600음을 넘는 score는 가장 이른 onset부터 선택하고 한 onset 자체가 한도를 넘으면 part별 round-robin으로 채웁니다. MIDI export는 native 960 PPQ를 480 PPQ로 반올림 quantize하고 note-off를 최소 1 tick 뒤에 둡니다. VLQ는 `0x0FFFFFFF`까지이며, 같은 port/channel/pitch의 겹친 note ownership은 긴 구간으로 합쳐 later reattack을 버리고 최초 velocity를 유지합니다(같은 onset이면 큰 velocity). 이는 SMF note-off 모호성을 피하기 위한 명시적 손실입니다.
+Live playback은 articulation 변환 뒤 note duration의 90%를 gate로 쓰되 최소 5 ms를 보장하고 attack을 18 ms 또는 duration의 35% 중 작은 값으로 제한합니다. 따라서 staccato는 native duration 50%에 공통 playback gate가 적용되고, tenuto는 현재 별도 연장 없이 기본 gate를 유지합니다. 600음을 넘는 score는 가장 이른 onset부터 선택하고 한 onset 자체가 한도를 넘으면 part별 round-robin으로 채웁니다. MIDI export는 native 960 PPQ를 480 PPQ로 반올림 quantize하고 note-off를 최소 1 tick 뒤에 둡니다. VLQ는 `0x0FFFFFFF`까지이며, 같은 port/channel/pitch의 겹친 note ownership은 긴 구간으로 합쳐 later reattack을 버리고 최초 velocity를 유지합니다(같은 onset이면 큰 velocity). 이는 SMF note-off 모호성을 피하기 위한 명시적 손실입니다.
 
 MIDI/MusicXML routing은 instrument family가 아니라 clef를 기준으로 하며, percussion clef만 GM channel 10에 배치하고 timpani·glockenspiel 같은 pitched percussion은 melodic route를 사용합니다. 각 port는 channel 10을 제외한 15개 melodic route를 제공하고, MusicXML `<midi-device port>`는 1–16, SMF `FF 21` port meta event는 같은 port를 0–15로 기록합니다. Export 상한은 고유 pitched route 240개와 독립 unpitched-percussion part 16개이며, 초과하면 명시적으로 오류를 반환합니다.
 
@@ -148,7 +154,7 @@ MIDI/MusicXML routing은 instrument family가 아니라 clef를 기준으로 하
 - fast-xml-parser 5 — MIT; 제한된 uncompressed score-partwise MusicXML import parser
 - 생성된 소셜 프리뷰 — 프로젝트 자산
 
-정확한 설치 버전, 근거와 미해결 사항은 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에 기록합니다. 현재 production client bundle의 Academico Regular/Bold, Bravura, Gonville, Petaluma, Petaluma Script **6개 font payload**는 정확한 byte·provenance·license가 확인됐고 Leland는 포함되지 않습니다. Font 관련 남은 상용 gate는 Academico·Bravura·Petaluma 계열의 완전한 OFL text·copyright notice와 Gonville `LICENCE.txt`를 실제 배포물의 사용자가 접근 가능한 Licenses surface에서 제공하는 것입니다.
+정확한 설치 버전, 근거와 미해결 사항은 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에 기록합니다. Release source는 VexFlow의 `vexflow/bravura` entry를 사용하여 production client에 Academico Regular/Bold와 Bravura **3개 font payload**만 포함합니다. Gonville, Petaluma, Petaluma Script, Leland는 현재 포함하지 않으며 향후 채택 시 artifact·license 감사를 다시 열어야 합니다. Font 관련 남은 상용 gate는 실제 shipped Academico·Bravura의 완전한 OFL text·copyright notice를 배포물의 사용자가 접근 가능한 Licenses surface에서 제공하는 것입니다.
 
 그 밖에도 npm artifact에 전체 license text가 없는 package의 canonical notice와 실제 production artifact의 transitive dependency·asset SBOM을 확인해야 합니다. 이 배포 gate가 닫히기 전에는 상용 배포 준비 완료로 표시하지 않습니다.
 

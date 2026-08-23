@@ -1,8 +1,8 @@
 import { getInstrument, SCORE_TEMPLATES } from "./catalog";
 import { assertKeySignature } from "./key-signatures";
 import type { KeySignature } from "./key-signatures";
-import type { DurationValue, DynamicMarking, InstrumentSnapshot, MeasureMeta, MusicEvent, PartData, Pitch, ScoreDocument, ScoreNote, StaffSelector } from "./model";
-import { DYNAMIC_MARKINGS, TICKS_PER_WHOLE, durationTicks, getPrimaryVoice, measureCapacity, resolveStaffIndex, validateScore, voiceTicks } from "./model";
+import type { Articulation, DurationValue, DynamicMarking, InstrumentSnapshot, MeasureMeta, MusicEvent, PartData, Pitch, ScoreDocument, ScoreNote, StaffSelector } from "./model";
+import { ARTICULATIONS, DYNAMIC_MARKINGS, TICKS_PER_WHOLE, durationTicks, getPrimaryVoice, measureCapacity, resolveStaffIndex, validateScore, voiceTicks } from "./model";
 
 const LETTERS = ["C", "D", "E", "F", "G", "A", "B"] as const;
 
@@ -780,6 +780,111 @@ export function setLastEventDynamic(
     previousDynamic: null,
     dynamic,
     error: "Enter a note or rest before adding a dynamic.",
+  };
+}
+
+export type SetLastNoteArticulationResult =
+  | {
+      score: ScoreDocument;
+      changed: boolean;
+      measureId: string;
+      eventId: string;
+      previousArticulation: Articulation | null;
+      articulation: Articulation | null;
+      error?: undefined;
+    }
+  | {
+      score: ScoreDocument;
+      changed: false;
+      measureId: string | null;
+      eventId: string | null;
+      previousArticulation: null;
+      articulation: Articulation | null;
+      error: string;
+    };
+
+/** Attaches, replaces, or clears one articulation on the selected staff's latest note event. */
+export function setLastNoteArticulation(
+  score: ScoreDocument,
+  partId: string,
+  articulation: Articulation | null,
+  staffIdOrIndex: StaffSelector = 0,
+): SetLastNoteArticulationResult {
+  if (articulation !== null && !ARTICULATIONS.includes(articulation)) {
+    return {
+      score,
+      changed: false,
+      measureId: null,
+      eventId: null,
+      previousArticulation: null,
+      articulation,
+      error: "Choose staccato, tenuto, accent, marcato, or none.",
+    };
+  }
+  const part = score.parts.find((item) => item.id === partId);
+  if (!part) {
+    return {
+      score,
+      changed: false,
+      measureId: null,
+      eventId: null,
+      previousArticulation: null,
+      articulation,
+      error: "Select an instrument first.",
+    };
+  }
+  const staffIndex = resolveStaffIndex(part, staffIdOrIndex);
+  if (staffIndex < 0) {
+    return {
+      score,
+      changed: false,
+      measureId: null,
+      eventId: null,
+      previousArticulation: null,
+      articulation,
+      error: "Select a valid staff first.",
+    };
+  }
+
+  for (let measureIndex = score.measureOrder.length - 1; measureIndex >= 0; measureIndex -= 1) {
+    const measureId = score.measureOrder[measureIndex];
+    const events = part.staves[staffIndex].measures[measureId]?.voices[0]?.events;
+    if (!events?.length) continue;
+    for (let eventIndex = events.length - 1; eventIndex >= 0; eventIndex -= 1) {
+      const event = events[eventIndex];
+      if (event.kind !== "note") continue;
+      const previousArticulation = event.articulation ?? null;
+      if (previousArticulation === articulation) {
+        return { score, changed: false, measureId, eventId: event.id, previousArticulation, articulation };
+      }
+      const next = structuredClone(score);
+      const nextEvent = next.parts.find((item) => item.id === partId)!
+        .staves[staffIndex].measures[measureId].voices[0].events[eventIndex];
+      if (nextEvent.kind !== "note") {
+        return {
+          score,
+          changed: false,
+          measureId,
+          eventId: event.id,
+          previousArticulation: null,
+          articulation,
+          error: "The last note event is not available for articulation editing.",
+        };
+      }
+      if (articulation === null) delete nextEvent.articulation;
+      else nextEvent.articulation = articulation;
+      return { score: stamp(next), changed: true, measureId, eventId: event.id, previousArticulation, articulation };
+    }
+  }
+
+  return {
+    score,
+    changed: false,
+    measureId: null,
+    eventId: null,
+    previousArticulation: null,
+    articulation,
+    error: "Enter a note before adding an articulation.",
   };
 }
 

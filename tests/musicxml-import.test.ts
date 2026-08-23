@@ -401,6 +401,81 @@ test("Garak MusicXML round-trips semantic dynamics on notes and rests across sta
   assert.deepEqual(validateScore(imported.score), []);
 });
 
+test("Garak MusicXML round-trips its complete single-articulation domain", () => {
+  const original = createScore("solo", { seedDemo: false });
+  const voice = getPrimaryVoice(original.parts[0], original.measureOrder[0]);
+  const articulations = ["staccato", "tenuto", "accent", "marcato"] as const;
+  const steps = ["C", "D", "E", "F"] as const;
+  articulations.forEach((articulation, index) => {
+    const event = makeEvent({
+      id: `roundtrip-articulation-${articulation}`,
+      pitch: { step: steps[index], alter: 0, octave: 4 },
+      duration: { base: 8, dots: 0 },
+      rest: false,
+    });
+    if (event.kind !== "note") assert.fail("Expected a note event.");
+    event.articulation = articulation;
+    voice.events.push(event);
+  });
+
+  const exported = scoreToMusicXML(original);
+  assert.match(exported, /<staccato\/>/);
+  assert.match(exported, /<tenuto\/>/);
+  assert.match(exported, /<accent\/>/);
+  assert.match(exported, /<strong-accent type="up"\/>/);
+  const imported = importMusicXML(exported);
+  assert.deepEqual(imported.warnings, []);
+  assert.deepEqual(
+    getPrimaryVoice(imported.score.parts[0], imported.score.measureOrder[0]).events.map((event) =>
+      event.kind === "note" ? event.articulation ?? null : null),
+    articulations,
+  );
+  assert.deepEqual(validateScore(imported.score), []);
+});
+
+test("MusicXML articulation import keeps supported marks and reports every lossy boundary", () => {
+  const xml = `<score-partwise version="4.0">
+    <part-list><score-part id="P1"><part-name>Articulation boundaries</part-name></score-part></part-list>
+    <part id="P1">
+      <measure number="1">
+        <attributes><divisions>480</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+        <note><pitch><step>C</step><octave>4</octave></pitch><duration>480</duration><voice>1</voice><type>quarter</type><notations><articulations><staccato/></articulations></notations></note>
+        <note><pitch><step>D</step><octave>4</octave></pitch><duration>480</duration><voice>1</voice><type>quarter</type><notations><articulations><tenuto placement="below"/></articulations></notations></note>
+        <note><pitch><step>E</step><octave>4</octave></pitch><duration>480</duration><voice>1</voice><type>quarter</type><notations><articulations><accent/><strong-accent type="down"/></articulations></notations></note>
+        <note><pitch><step>F</step><octave>4</octave></pitch><duration>480</duration><voice>1</voice><type>quarter</type><notations><articulations><breath-mark/><accent/></articulations></notations></note>
+      </measure>
+      <measure number="2">
+        <note><pitch><step>G</step><octave>4</octave></pitch><duration>480</duration><voice>1</voice><type>quarter</type><notations><articulations><accent/></articulations></notations></note>
+        <note><chord/><pitch><step>B</step><octave>4</octave></pitch><duration>480</duration><voice>1</voice><type>quarter</type><notations><articulations><strong-accent/></articulations></notations></note>
+        <note><rest/><duration>480</duration><voice>1</voice><type>quarter</type><notations><articulations><staccato/></articulations></notations></note>
+      </measure>
+    </part>
+  </score-partwise>`;
+
+  const imported = importMusicXML(xml);
+  const part = imported.score.parts[0];
+  assert.deepEqual(
+    getPrimaryVoice(part, imported.score.measureOrder[0]).events.map((event) =>
+      event.kind === "note" ? event.articulation ?? null : null),
+    ["staccato", "tenuto", "marcato", "accent"],
+  );
+  const secondMeasure = getPrimaryVoice(part, imported.score.measureOrder[1]).events;
+  assert.equal(secondMeasure[0].kind, "note");
+  if (secondMeasure[0].kind !== "note") assert.fail("Expected an imported chord.");
+  assert.equal(secondMeasure[0].notes.length, 2);
+  assert.equal(secondMeasure[0].articulation, "marcato", "the later chord-tone articulation wins visibly");
+  assert.equal(Object.hasOwn(secondMeasure[1], "articulation"), false, "rest articulations never enter the score model");
+
+  const report = imported.warnings.join("\n");
+  assert.match(report, /below tenuto placement.*normalized above/i);
+  assert.match(report, /down strong-accent direction.*marcato.*normalized upward/i);
+  assert.match(report, /multiple supported articulations accent and marcato.*later marcato/i);
+  assert.match(report, /unsupported articulation breath-mark was skipped/i);
+  assert.match(report, /conflicting chord articulations accent and marcato.*later marcato/i);
+  assert.match(report, /staccato on a rest cannot be represented and was skipped/i);
+  assert.deepEqual(validateScore(imported.score), []);
+});
+
 test("MusicXML import anchors a dynamic to a decomposed full-measure rest instead of leaking it across a barline", () => {
   const xml = `<score-partwise version="4.0">
     <part-list><score-part id="P1"><part-name>Full-rest dynamics</part-name></score-part></part-list>

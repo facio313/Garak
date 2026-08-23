@@ -8,6 +8,8 @@ export type Clef = "treble" | "bass" | "alto" | "tenor" | "percussion";
 export type DurationBase = 1 | 2 | 4 | 8 | 16 | 32 | 64;
 export const DYNAMIC_MARKINGS = ["ppp", "pp", "p", "mp", "mf", "f", "ff", "fff"] as const;
 export type DynamicMarking = typeof DYNAMIC_MARKINGS[number];
+export const ARTICULATIONS = ["staccato", "tenuto", "accent", "marcato"] as const;
+export type Articulation = typeof ARTICULATIONS[number];
 
 /** MIDI Note On velocities used consistently by live playback and MIDI export. */
 export const DYNAMIC_VELOCITIES: Record<DynamicMarking, number> = {
@@ -67,6 +69,8 @@ export interface NoteEvent {
   notes: ScoreNote[];
   duration: DurationValue;
   dynamic?: DynamicMarking;
+  /** One event-level articulation applies to every tone in a chord. */
+  articulation?: Articulation;
 }
 
 export interface RestEvent {
@@ -263,6 +267,7 @@ const VALID_DOT_COUNTS = new Set<number>([0, 1, 2]);
 const VALID_PITCH_STEPS = new Set<PitchStep>(["C", "D", "E", "F", "G", "A", "B"]);
 const VALID_ACCIDENTAL_DISPLAYS = new Set<ScoreNote["accidentalDisplay"]>(["auto", "force", "hide"]);
 const VALID_DYNAMIC_MARKINGS = new Set<DynamicMarking>(DYNAMIC_MARKINGS);
+const VALID_ARTICULATIONS = new Set<Articulation>(ARTICULATIONS);
 const VALID_INSTRUMENT_COLOR = /^#[0-9A-Fa-f]{6}$/;
 
 class ValidationErrorLimitReached extends Error {
@@ -701,9 +706,11 @@ function validateScoreStructure(score: unknown, requireComplete: boolean): strin
             }
 
             const hasEventPitch = Object.prototype.hasOwnProperty.call(rawEvent, "pitch");
+            const hasArticulation = Object.prototype.hasOwnProperty.call(rawEvent, "articulation");
             if (rawEvent.kind === "rest") {
               if (hasEventPitch) errors.push(`${eventLabel} is a rest and must not contain pitch data.`);
               if (Object.prototype.hasOwnProperty.call(rawEvent, "notes")) errors.push(`${eventLabel} is a rest and must not contain note data.`);
+              if (hasArticulation) errors.push(`${eventLabel} is a rest and must not contain an articulation.`);
               return;
             }
             if (rawEvent.kind !== "note") {
@@ -712,6 +719,9 @@ function validateScoreStructure(score: unknown, requireComplete: boolean): strin
               return;
             }
             if (hasEventPitch) errors.push(`${eventLabel} is a note event and must not contain event-level pitch data; pitches belong to note entries.`);
+            if (hasArticulation && !VALID_ARTICULATIONS.has(rawEvent.articulation as Articulation)) {
+              errors.push(`${eventLabel} has an invalid articulation; use staccato, tenuto, accent, or marcato.`);
+            }
             const rawNotes = rawEvent.notes;
             if (!Array.isArray(rawNotes) || !rawNotes.length) {
               errors.push(`${eventLabel} must contain at least one note.`);

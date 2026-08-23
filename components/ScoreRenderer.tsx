@@ -41,6 +41,12 @@ const ROW_HEIGHT = 86;
 const SYSTEM_GAP = 42;
 const LABEL_WIDTH = 88;
 const RIGHT_MARGIN = 14;
+const VEXFLOW_ARTICULATION_CODES = {
+  staccato: "a.",
+  tenuto: "a-",
+  accent: "a>",
+  marcato: "a^",
+} as const;
 
 function vexKey(event: MusicEvent, clef: string): string[] {
   if (event.kind === "rest") return [clef === "bass" ? "d/3" : clef === "alto" || clef === "tenor" ? "c/4" : "b/4"];
@@ -82,6 +88,7 @@ function measureMusicWidth(rows: readonly RenderRow[], measureId: string): numbe
     for (const event of events) {
       width += event.duration.dots * 8;
       if (event.dynamic) width += 10;
+      if (event.kind === "note" && event.articulation) width += 10;
       if (event.kind === "note") {
         width += Math.max(0, event.notes.length - 1) * 9;
         width += event.notes.filter((note) => note.pitch.alter !== 0).length * 7;
@@ -164,7 +171,7 @@ export function ScoreRenderer({ score, selectedPartId, viewMode, zoom, onSelectP
         return;
       }
       try {
-        const { Accidental, Beam, Dot, Formatter, Fraction, GhostNote, Renderer, Stave, StaveConnector, StaveNote, StaveTie, TextDynamics, Voice } = await import("vexflow");
+        const { Accidental, Articulation, Beam, Dot, Formatter, Fraction, GhostNote, ModifierPosition, Renderer, Stave, StaveConnector, StaveNote, StaveTie, TextDynamics, Voice } = await import("vexflow/bravura");
         if (disposed || !hostRef.current) return;
         const renderer = new Renderer(host, Renderer.Backends.SVG);
         renderer.resize(renderWidth, renderHeight);
@@ -255,7 +262,7 @@ export function ScoreRenderer({ score, selectedPartId, viewMode, zoom, onSelectP
 
           system.measureIds.forEach((measureId, measureIndex) => {
             const measure = score.measures[measureId];
-            const cells: Array<{ voice: VexVoice; dynamicsVoice: VexVoice; notes: StaveNote[]; beams: VexBeam[]; stave: VexStave }> = [];
+            const cells: Array<{ voice: VexVoice; dynamicsVoice?: VexVoice; notes: StaveNote[]; beams: VexBeam[]; stave: VexStave }> = [];
 
             rows.forEach((row) => {
               const stave = stavesByMeasure[measureIndex][row.rowIndex];
@@ -280,6 +287,12 @@ export function ScoreRenderer({ score, selectedPartId, viewMode, zoom, onSelectP
                     if (accidental) note.addModifier(new Accidental(accidental), noteIndex);
                     noteRefs.set(scoreNote.id, { note, index: noteIndex, systemIndex });
                   });
+                  if (event.articulation) {
+                    note.addModifier(
+                      new Articulation(VEXFLOW_ARTICULATION_CODES[event.articulation]).setPosition(ModifierPosition.ABOVE),
+                      0,
+                    );
+                  }
                 }
                 for (let dotIndex = 0; dotIndex < event.duration.dots; dotIndex += 1) {
                   Dot.buildAndAttach([note], { all: true });
@@ -287,25 +300,24 @@ export function ScoreRenderer({ score, selectedPartId, viewMode, zoom, onSelectP
                 note.setStave(stave);
                 return note;
               });
-              const dynamicTickables = sourceEvents.map((event) => {
-                const duration = vexDuration(event).replace(/r$/, "");
-                const fullMeasure = getFullMeasureDuration(measure.time);
-                const dynamic = event.dynamic
-                  ? new TextDynamics({ duration, text: event.dynamic, line: 9 })
-                  : new GhostNote(isEmptyMeasure
-                    ? { duration, durationOverride: new Fraction(fullMeasure.numerator, fullMeasure.denominator) }
-                    : duration);
-                dynamic.setStave(stave);
-                return dynamic;
-              });
               const voice = new Voice({ numBeats: measure.time.numerator, beatValue: measure.time.denominator })
                 .setMode(Voice.Mode.SOFT)
                 .setStave(stave)
                 .addTickables(notes);
-              const dynamicsVoice = new Voice({ numBeats: measure.time.numerator, beatValue: measure.time.denominator })
-                .setMode(Voice.Mode.SOFT)
-                .setStave(stave)
-                .addTickables(dynamicTickables);
+              const hasDynamics = sourceEvents.some((event) => event.dynamic);
+              const dynamicsVoice = hasDynamics
+                ? new Voice({ numBeats: measure.time.numerator, beatValue: measure.time.denominator })
+                  .setMode(Voice.Mode.SOFT)
+                  .setStave(stave)
+                  .addTickables(sourceEvents.map((event) => {
+                    const duration = vexDuration(event).replace(/r$/, "");
+                    const dynamic = event.dynamic
+                      ? new TextDynamics({ duration, text: event.dynamic, line: 9 })
+                      : new GhostNote(duration);
+                    dynamic.setStave(stave);
+                    return dynamic;
+                  }))
+                : undefined;
               const beams = Beam.generateBeams(notes, {
                 groups: getDefaultBeamGroups(measure.time).map((group) => new Fraction(group.numerator, group.denominator)),
               });
@@ -315,11 +327,11 @@ export function ScoreRenderer({ score, selectedPartId, viewMode, zoom, onSelectP
             const noteStartX = Math.max(...cells.map((cell) => cell.stave.getNoteStartX()));
             cells.forEach((cell) => cell.stave.setNoteStartX(noteStartX));
             const justifyWidth = Math.max(24, cells[0].stave.getNoteEndX() - noteStartX);
-            const voices = cells.flatMap((cell) => [cell.voice, cell.dynamicsVoice]);
+            const voices = cells.flatMap((cell) => cell.dynamicsVoice ? [cell.voice, cell.dynamicsVoice] : [cell.voice]);
             new Formatter().joinVoices(voices).format(voices, justifyWidth, { context });
             cells.forEach((cell) => {
               cell.voice.draw(context, cell.stave);
-              cell.dynamicsVoice.draw(context, cell.stave);
+              cell.dynamicsVoice?.draw(context, cell.stave);
               cell.beams.forEach((beam) => beam.setContext(context).draw());
             });
           });
@@ -366,6 +378,25 @@ export function ScoreRenderer({ score, selectedPartId, viewMode, zoom, onSelectP
     : viewMode === "score"
       ? rows.filter((row) => row.part.id === selectedPartId)
       : [];
+  const keyboardRow = selectedStaffRow ?? rows.find((row) => row.part.id === selectedPartId) ?? rows[0];
+  const handleRowKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown" && event.key !== "Enter") return;
+    event.preventDefault();
+    event.stopPropagation();
+    const currentIndex = Math.max(0, rows.indexOf(keyboardRow));
+    const nextIndex = event.key === "ArrowUp"
+      ? Math.max(0, currentIndex - 1)
+      : event.key === "ArrowDown"
+        ? Math.min(rows.length - 1, currentIndex + 1)
+        : currentIndex;
+    const next = rows[nextIndex];
+    if (!next) return;
+    onSelectPart(next.part.id);
+    onSelectStaff?.(next.staff.id);
+  };
+  const scoreControlLabel = keyboardRow
+    ? `${score.metadata.title}. ${score.parts.length} parts, ${score.measureOrder.length} measures. Selected ${keyboardRow.part.name}, staff ${keyboardRow.staffIndex + 1}, ${keyboardRow.staff.clef} clef. Use Up and Down Arrow to select a staff; use A through G to enter notes.`
+    : `${score.metadata.title}. No editable staff rows.`;
 
   return (
     <div ref={frameRef} className="engraving-frame" style={{ height: `${renderHeight * scale}px` }}>
@@ -378,7 +409,7 @@ export function ScoreRenderer({ score, selectedPartId, viewMode, zoom, onSelectP
           />
         )))}
         <div ref={hostRef} className="vexflow-host" aria-hidden="true" />
-        <button type="button" className="score-hit-target" onClick={handleClick} aria-label="Score. Select a staff row, then use A through G to enter notes." />
+        <button type="button" className="score-hit-target" onClick={handleClick} onKeyDown={handleRowKeyDown} aria-label={scoreControlLabel} />
       </div>
       {renderError ? <div className="engraving-error" role="alert">{renderError}</div> : null}
     </div>
