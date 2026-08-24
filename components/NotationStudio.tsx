@@ -815,6 +815,9 @@ export function NotationStudio() {
     <main className="studio-shell">
       <header className="app-header">
         <div className="brand" aria-label="Garak Studio"><span className="brand-mark">G</span><span>Garak</span><span className="beta-tag">ALPHA</span></div>
+        <a className="bonifacio-return-link" href="https://bonifacio.work/" aria-label="← Bonifacio">
+          <span>←</span><span className="bonifacio-return-label">Bonifacio</span>
+        </a>
         <button
           className="project-title"
           onClick={() => {

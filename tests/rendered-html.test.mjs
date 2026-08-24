@@ -28,6 +28,9 @@ test("server-renders the Garak notation studio", async () => {
   const html = await response.text();
   assert.match(html, /<title>Garak — Orchestra notation studio<\/title>/i);
   assert.match(html, />Garak</);
+  assert.match(html, /class="bonifacio-return-link"[^>]*href="https:\/\/bonifacio\.work\/"[^>]*aria-label="← Bonifacio"/);
+  assert.match(html, /<span>←<\/span><span class="bonifacio-return-label">Bonifacio<\/span>/);
+  assert.doesNotMatch(html, /class="bonifacio-return-link"[^>]*target=/);
   assert.match(html, />Instruments</);
   assert.match(html, /\bExport\b/);
   assert.match(html, /Score canvas/);
