@@ -59,6 +59,14 @@ npm test
 
 현재 테스트 개수와 통과 여부는 위 명령의 최신 출력이 기준입니다. `npm test`는 프로덕션 빌드를 새로 만들고 음악 코어·MusicXML import·실제 서버 렌더 회귀를 함께 실행합니다. 실제 브라우저의 SVG 배치, file chooser import, zoom/scroll, console 오류 확인은 별도 수동 회귀 증거로 관리하며 자동 테스트 개수에 합산하지 않습니다.
 
+## 운영 배포
+
+Raspberry Pi 운영 주소는 `https://bonifacio.work/garak/`입니다. 운영 이미지는 `/garak` base path가 포함된 vinext standalone server로 빌드되며, Raspberry Pi에서는 `127.0.0.1:5183`에만 bind됩니다. 외부 요청은 Bonifacio Nginx와 중앙 SSO를 통과해야 하며 컨테이너 origin을 직접 공개하지 않습니다.
+
+`main`의 `Validate` workflow가 성공한 정확한 40자리 commit SHA만 GitHub-hosted ARM64 runner에서 `ghcr.io/facio313/garak:<sha>`로 빌드됩니다. 동일 이미지를 read-only root filesystem과 dropped capabilities로 smoke test한 뒤 SHA tag만 push하고, 기존 제한 SSH 채널에 `deploy garak <sha>`를 요청합니다. 서버는 대상 컨테이너만 교체하고 loopback `/garak/healthz` 확인에 실패하면 직전 Garak image로 되돌려야 합니다.
+
+Sites와 로컬 개발은 계속 `/`에서 실행됩니다. Raspberry Pi image만 `GARAK_SELF_HOSTED=1`, `GARAK_BASE_PATH=/garak`, `GARAK_PUBLIC_URL=https://bonifacio.work/garak/`을 사용하므로 두 배포 경로의 asset URL이 섞이지 않습니다. 최초 서버 등록, Nginx location, 중앙 SSO ACL, GitHub secret과 rollback 계약은 [배포 가이드](docs/DEPLOYMENT.md)에 정리되어 있습니다.
+
 ## 키보드 입력
 
 악보에서 입력할 스태프를 선택한 뒤 다음 단축키를 사용할 수 있습니다.
@@ -105,10 +113,16 @@ npm test
 
 ```text
 app/                    앱 진입점, 전역 스타일, 메타데이터
+.github/                검증, ARM64 image smoke/publish, 제한 배포 요청
 components/             편집기 UI와 교체 가능한 VexFlow 렌더러
+deploy/                 bonifacio.work host Nginx location 계약
 lib/music/              음악 모델, 악기 카탈로그, 명령, export, playback plan
+scripts/                branch-bound portfolio 인증 mode 계약
 tests/                  도메인 불변식과 실제 서버 렌더 검증
+Dockerfile              RPi용 non-root vinext standalone image
+docker-compose.prod.yml RPi loopback-only production service
 docs/ARCHITECTURE.md     상용화를 고려한 장기 기술 설계
+docs/DEPLOYMENT.md       GitHub Actions, RPi, SSO, proxy, rollback runbook
 docs/ROADMAP.md          Finale/Sibelius/MuseScore급 확장 로드맵
 docs/SESSION_HANDOFF.md  다음 작업자가 즉시 이어갈 체크리스트
 THIRD_PARTY_NOTICES.md   배포 라이선스 inventory와 미해결 release gate
