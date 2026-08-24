@@ -82,6 +82,17 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
+      - name: Refuse an existing immutable revision tag
+        env:
+          GARAK_RUNTIME_IMAGE: ${{ env.GARAK_IMAGE }}:${{ steps.source.outputs.sha }}
+        run: |
+          set -Eeuo pipefail
+          if docker manifest inspect "$GARAK_RUNTIME_IMAGE" >/dev/null 2>&1; then
+            printf 'refusing to overwrite existing immutable image tag: %s\n' \
+              "$GARAK_RUNTIME_IMAGE" >&2
+            exit 1
+          fi
+
       - name: Build immutable ARM64 runtime image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
@@ -123,6 +134,17 @@ jobs:
       contents: read
       packages: read
     steps:
+      - name: Confirm the validated revision is still main
+        env:
+          DEPLOY_SHA: ${{ needs.publish.outputs.deploy_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          current_main_sha=$(gh api \
+            "repos/$GITHUB_REPOSITORY/git/ref/heads/main" \
+            --jq '.object.sha')
+          [[ "$current_main_sha" == "$DEPLOY_SHA" ]]
+
       - name: Request restricted server deployment
         env:
           DEPLOY_ACTOR: ${{ github.event.workflow_run.actor.login }}

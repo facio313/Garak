@@ -23,11 +23,13 @@ cleanup
 
 image_user=$(docker image inspect --format '{{.Config.User}}' "$GARAK_RUNTIME_IMAGE")
 image_arch=$(docker image inspect --format '{{.Architecture}}' "$GARAK_RUNTIME_IMAGE")
+image_os=$(docker image inspect --format '{{.Os}}' "$GARAK_RUNTIME_IMAGE")
 image_branch=$(docker image inspect --format '{{index .Config.Labels "work.bonifacio.portfolio.branch"}}' "$GARAK_RUNTIME_IMAGE")
 image_auth_mode=$(docker image inspect --format '{{index .Config.Labels "work.bonifacio.portfolio.auth-mode"}}' "$GARAK_RUNTIME_IMAGE")
 image_revision=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$GARAK_RUNTIME_IMAGE")
 
 [[ "$image_user" == "10001:10001" ]]
+[[ "$image_os" == "linux" ]]
 [[ "$image_arch" == "arm64" ]]
 [[ "$image_branch" == "$EXPECTED_BRANCH" ]]
 [[ "$image_auth_mode" == "$EXPECTED_AUTH_MODE" ]]

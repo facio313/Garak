@@ -32,7 +32,7 @@ The repository intentionally supports two hosting targets.
 
 `.github/workflows/deploy.yml` is a `workflow_run` consumer of `Validate` on `main`. It refuses pull-request and fork results, checks out the exact validated SHA, and requires that SHA to remain the current `main` head. A native GitHub-hosted ARM64 runner then:
 
-1. builds `ghcr.io/facio313/garak:<sha>` with `main/sso` provenance labels;
+1. refuses to overwrite an existing SHA tag, then builds `ghcr.io/facio313/garak:<sha>` with `main/sso` provenance labels;
 2. starts that exact image as UID/GID `10001:10001`, with a read-only root filesystem, all capabilities dropped, and `no-new-privileges`;
 3. verifies the image architecture, labels, revision, `/garak/healthz`, rendered HTML, canonical URL, prefixed assets, and the 404 outside `/garak`;
 4. pushes only the smoke-tested immutable SHA tag;
@@ -64,7 +64,7 @@ The server-side handler is part of the portfolio host, not this application repo
 4. verify `linux/arm64`, the OCI revision label, `main` branch label, and `sso` mode label;
 5. record the currently healthy Garak SHA, then replace only the `garak` service;
 6. wait for Docker health and fetch `http://127.0.0.1:5183/garak/healthz` plus the prefixed HTML and one hashed asset;
-7. on failure, restore only the previous Garak SHA and prove its health before returning a failure exit status;
+7. on failure, restore only the previous Garak SHA and prove its exact image ID, health response, rendered HTML, and hashed asset before returning a failure exit status;
 8. on success, atomically write `/home/cks/.local/state/portfolio-deploy/garak.revision` and log only non-secret release metadata.
 
 Never run a global image/system prune, stack-wide `down`, or any volume deletion from the Garak handler. Garak is stateless on the server, but unrelated portfolio containers and durable data are outside its authority.
