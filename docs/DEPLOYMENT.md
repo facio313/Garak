@@ -49,7 +49,7 @@ Perform these steps under the fleet deployment lock. They are bootstrap operatio
 3. Register exactly `deploy garak <40-character-lowercase-hex-sha>` in the forced-command dispatcher. Do not grant arbitrary shell access.
 4. Add `deploy/bonifacio-nginx-location.conf` to the existing `bonifacio.work` HTTPS server block. Its `proxy_pass` intentionally has no trailing slash so `/garak` remains present when vinext receives the request.
 5. Add `'^/garak(?:[/?].*)?$'` to Bonifacio's ordered `user` ACL before its matching deny rule, update the ACL contract test, and deploy the matching Bonifacio SSO image.
-6. Install the Garak deployment public key on the server with the same forced-command, no-forwarding restrictions used by the other portfolio applications, then set the corresponding private key as the Garak repository's `DEPLOY_KEY` secret.
+6. Install a Garak-specific deployment public key with `restrict` and the forced command `/usr/local/libexec/portfolio-deploy-garak`. The wrapper must accept only `deploy garak <sha>`, set `PORTFOLIO_DEPLOY_KEY_SCOPE=garak`, and delegate to the common dispatcher. Store only the corresponding private key as the Garak repository's `DEPLOY_KEY` secret; do not reuse a fleet-wide deployment key.
 7. Run `nginx -t` before reloading Nginx. A failed validation must leave the previous effective configuration untouched.
 
 The Nginx location includes `/etc/nginx/snippets/bonifacio-sso-authrequest.conf`, forwards to `127.0.0.1:5183`, preserves the prefix, and maps unavailable upstream responses to the portfolio maintenance page. There is no public bypass for `/garak/healthz`.
