@@ -1,0 +1,34 @@
+services:
+  garak:
+    image: ghcr.io/facio313/garak:${GARAK_IMAGE_TAG:?set a 40-character commit SHA}
+    platform: linux/arm64
+    container_name: garak
+    user: "10001:10001"
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      GARAK_BASE_PATH: /garak
+      GARAK_PUBLIC_URL: https://bonifacio.work/garak/
+      GARAK_SELF_HOSTED: "1"
+      PORTFOLIO_BRANCH: ${PORTFOLIO_BRANCH:?set the deployed source branch}
+      PORTFOLIO_AUTH_MODE: ${PORTFOLIO_AUTH_MODE:?resolve the branch auth contract}
+    ports:
+      - "127.0.0.1:5183:3000"
+    restart: always
+    stop_grace_period: 15s
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/garak/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 10s
