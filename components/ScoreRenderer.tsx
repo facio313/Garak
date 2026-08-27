@@ -6,6 +6,15 @@ import { keySignaturesEqual, resolveMeasureAccidentals, timeSignaturesEqual } fr
 import { fifthsToVexFlowKey, writtenKeyForPart } from "../lib/music/key-signatures";
 import { getDefaultBeamGroups, getFullMeasureDuration } from "../lib/music/meter";
 import type { MusicEvent, PartData, ScoreDocument, StaffData, VoiceData } from "../lib/music/model";
+import { durationTicks, measureCapacity } from "../lib/music/model";
+import { locatePlaybackPosition } from "../lib/music/playback-position";
+
+export interface ScoreEventSelection {
+  partId: string;
+  staffId: string;
+  measureId: string;
+  eventId: string;
+}
 
 interface ScoreRendererProps {
   score: ScoreDocument;
@@ -15,6 +24,12 @@ interface ScoreRendererProps {
   onSelectPart: (partId: string) => void;
   selectedStaffId?: string;
   onSelectStaff?: (staffId: string) => void;
+  playbackSeconds?: number | null;
+  entryMeasureId?: string | null;
+  entryTick?: number;
+  selectedEventId?: string | null;
+  inputFollowRevision?: number;
+  onSelectEvent?: (selection: ScoreEventSelection | null) => void;
 }
 
 interface SystemLayout {
@@ -37,10 +52,149 @@ interface PartRowGroup {
   lastRowIndex: number;
 }
 
+interface MeasureScreenLayout {
+  measureId: string;
+  systemIndex: number;
+  startX: number;
+  endX: number;
+  top: number;
+  height: number;
+  tickAnchors: Array<{ tick: number; x: number }>;
+}
+
+interface EventScreenLayout extends ScoreEventSelection {
+  systemIndex: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+interface EngravingSource {
+  score: ScoreDocument;
+  rows: readonly RenderRow[];
+  renderWidth: number;
+}
+
+interface EngravingState {
+  source: EngravingSource | null;
+  measureLayouts: MeasureScreenLayout[];
+  eventLayouts: EventScreenLayout[];
+  error: string;
+}
+
+interface ScreenRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 const ROW_HEIGHT = 86;
 const SYSTEM_GAP = 42;
 const LABEL_WIDTH = 88;
 const RIGHT_MARGIN = 14;
+const TOP_PADDING = 32;
+const FOLLOW_MARGIN = 12;
+const EMPTY_MEASURE_LAYOUTS: readonly MeasureScreenLayout[] = [];
+const EMPTY_EVENT_LAYOUTS: readonly EventScreenLayout[] = [];
+
+function pointToRectDistance(x: number, y: number, rect: ScreenRect): number {
+  const dx = x < rect.x ? rect.x - x : x > rect.x + rect.width ? x - rect.x - rect.width : 0;
+  const dy = y < rect.y ? rect.y - y : y > rect.y + rect.height ? y - rect.y - rect.height : 0;
+  return Math.hypot(dx, dy);
+}
+
+function pointToRectCenterDistance(x: number, y: number, rect: ScreenRect): number {
+  return Math.hypot(x - (rect.x + rect.width / 2), y - (rect.y + rect.height / 2));
+}
+
+function scrollScreenRectIntoView(frame: HTMLDivElement | null, rect: ScreenRect, scale: number): void {
+  if (!frame) return;
+
+  const targetLeft = rect.x * scale;
+  const targetRight = (rect.x + rect.width) * scale;
+  const viewportLeft = frame.scrollLeft;
+  const viewportRight = viewportLeft + frame.clientWidth;
+  let nextScrollLeft = viewportLeft;
+  const targetCoversHorizontalViewport = targetLeft <= viewportLeft && targetRight >= viewportRight;
+  if (!targetCoversHorizontalViewport) {
+    if (targetLeft < viewportLeft) nextScrollLeft = Math.max(0, targetLeft - FOLLOW_MARGIN);
+    else if (targetRight > viewportRight) nextScrollLeft = Math.min(
+      Math.max(0, frame.scrollWidth - frame.clientWidth),
+      targetRight + FOLLOW_MARGIN - frame.clientWidth,
+    );
+  }
+  if (Math.abs(nextScrollLeft - viewportLeft) >= 1) {
+    frame.scrollTo({ left: nextScrollLeft, behavior: "auto" });
+  }
+
+  const canvas = frame.closest<HTMLElement>(".canvas-area");
+  if (!canvas) return;
+  const frameBounds = frame.getBoundingClientRect();
+  const canvasBounds = canvas.getBoundingClientRect();
+  const targetTop = frameBounds.top + rect.y * scale;
+  const targetBottom = frameBounds.top + (rect.y + rect.height) * scale;
+  let verticalDelta = 0;
+  const targetCoversVerticalViewport = targetTop <= canvasBounds.top && targetBottom >= canvasBounds.bottom;
+  if (!targetCoversVerticalViewport) {
+    if (targetTop < canvasBounds.top) verticalDelta = targetTop - canvasBounds.top - FOLLOW_MARGIN;
+    else if (targetBottom > canvasBounds.bottom) verticalDelta = targetBottom - canvasBounds.bottom + FOLLOW_MARGIN;
+  }
+  if (Math.abs(verticalDelta) >= 1) {
+    canvas.scrollTo({ top: Math.max(0, canvas.scrollTop + verticalDelta), behavior: "auto" });
+  }
+}
+
+function scrollStaffRowIntoView(
+  frame: HTMLDivElement | null,
+  rowIndex: number,
+  systemCount: number,
+  systemHeight: number,
+  engravingWidth: number,
+  scale: number,
+): void {
+  if (!frame || systemCount <= 0) return;
+  const canvas = frame.closest<HTMLElement>(".canvas-area");
+  if (!canvas) return;
+  const frameBounds = frame.getBoundingClientRect();
+  const canvasBounds = canvas.getBoundingClientRect();
+  const viewportCenter = (canvasBounds.top + canvasBounds.bottom) / 2;
+  const nearestRow = Array.from({ length: systemCount }, (_, systemIndex): ScreenRect => ({
+    x: 0,
+    y: TOP_PADDING + systemIndex * systemHeight + rowIndex * ROW_HEIGHT,
+    width: engravingWidth,
+    height: ROW_HEIGHT,
+  })).map((rect) => {
+    const top = frameBounds.top + rect.y * scale;
+    const bottom = frameBounds.top + (rect.y + rect.height) * scale;
+    const viewportDistance = bottom < canvasBounds.top
+      ? canvasBounds.top - bottom
+      : top > canvasBounds.bottom
+        ? top - canvasBounds.bottom
+        : 0;
+    return { rect, viewportDistance, centerDistance: Math.abs((top + bottom) / 2 - viewportCenter) };
+  }).sort((left, right) => left.viewportDistance - right.viewportDistance || left.centerDistance - right.centerDistance)[0]?.rect;
+  if (nearestRow) scrollScreenRectIntoView(frame, nearestRow, scale);
+}
+
+function xForMeasureTick(layout: MeasureScreenLayout, tick: number, capacity: number): number {
+  const safeTick = Math.max(0, Math.min(capacity, tick));
+  const anchors = [
+    ...(layout.tickAnchors.length ? layout.tickAnchors : [{ tick: 0, x: layout.startX }]),
+    { tick: capacity, x: layout.endX },
+  ].sort((left, right) => left.tick - right.tick);
+  if (safeTick <= anchors[0].tick) return anchors[0].x;
+  for (let index = 1; index < anchors.length; index += 1) {
+    const next = anchors[index];
+    if (safeTick > next.tick) continue;
+    const previous = anchors[index - 1];
+    if (next.tick === previous.tick) return next.x;
+    const progress = (safeTick - previous.tick) / (next.tick - previous.tick);
+    return previous.x + (next.x - previous.x) * progress;
+  }
+  return layout.endX;
+}
 const VEXFLOW_ARTICULATION_CODES = {
   staccato: "a.",
   tenuto: "a-",
@@ -100,7 +254,10 @@ function measureMusicWidth(rows: readonly RenderRow[], measureId: string): numbe
     }
     return width;
   });
-  return Math.max(96, Math.min(430, ...(widths.length ? widths : [96])));
+  // A legal 4/4 measure can contain 64 sixty-fourth notes. Capping this width
+  // made VexFlow spill dense notes through the right barline and into the next
+  // measure, so an intrinsically wide measure now owns horizontal scroll.
+  return Math.max(104, ...(widths.length ? widths : [104]));
 }
 
 function modifierWidth(score: ScoreDocument, rows: readonly RenderRow[], measureId: string, absoluteIndex: number, systemStart: boolean): number {
@@ -144,18 +301,51 @@ function buildSystems(score: ScoreDocument, rows: readonly RenderRow[], renderWi
   });
 }
 
-export function ScoreRenderer({ score, selectedPartId, viewMode, zoom, onSelectPart, selectedStaffId, onSelectStaff }: ScoreRendererProps) {
+export function ScoreRenderer({
+  score,
+  selectedPartId,
+  viewMode,
+  zoom,
+  onSelectPart,
+  selectedStaffId,
+  onSelectStaff,
+  playbackSeconds = null,
+  entryMeasureId = null,
+  entryTick = 0,
+  selectedEventId = null,
+  inputFollowRevision = 0,
+  onSelectEvent,
+}: ScoreRendererProps) {
   const frameRef = useRef<HTMLDivElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
+  const completedInputFollowRef = useRef(inputFollowRevision);
+  const engravingRequestRef = useRef(0);
   const [physicalWidth, setPhysicalWidth] = useState(640);
-  const [renderError, setRenderError] = useState("");
+  const [engravingState, setEngravingState] = useState<EngravingState>({
+    source: null,
+    measureLayouts: [],
+    eventLayouts: [],
+    error: "",
+  });
   const parts = useMemo(() => viewMode === "part" ? score.parts.filter((part) => part.id === selectedPartId) : score.parts, [score.parts, selectedPartId, viewMode]);
   const { rows, partGroups } = useMemo(() => buildRenderRows(parts), [parts]);
   const scale = Math.max(.55, Math.min(1.5, zoom / 100));
-  const renderWidth = Math.max(640, Math.floor(physicalWidth / scale));
+  const renderWidth = Math.max(480, Math.floor(physicalWidth / scale));
   const systems = useMemo(() => buildSystems(score, rows, renderWidth), [renderWidth, rows, score]);
+  const engravingWidth = Math.max(
+    renderWidth,
+    ...systems.map((system) => LABEL_WIDTH + RIGHT_MARGIN + system.widths.reduce((sum, width) => sum + width, 0)),
+  );
   const systemHeight = rows.length * ROW_HEIGHT + SYSTEM_GAP;
-  const renderHeight = Math.max(230, systems.length * systemHeight + 22);
+  const renderHeight = Math.max(230, systems.length * systemHeight + TOP_PADDING + 4);
+  const engravingSource = useMemo<EngravingSource>(
+    () => ({ score, rows, renderWidth }),
+    [renderWidth, rows, score],
+  );
+  const layoutsAreCurrent = engravingState.source === engravingSource;
+  const measureLayouts = layoutsAreCurrent ? engravingState.measureLayouts : EMPTY_MEASURE_LAYOUTS;
+  const eventLayouts = layoutsAreCurrent ? engravingState.eventLayouts : EMPTY_EVENT_LAYOUTS;
+  const renderError = layoutsAreCurrent ? engravingState.error : "";
 
   useEffect(() => {
     const frame = frameRef.current;
@@ -164,7 +354,7 @@ export function ScoreRenderer({ score, selectedPartId, viewMode, zoom, onSelectP
     let resizeTimer: number | null = null;
     let pendingWidth = 0;
     const observer = new ResizeObserver(([entry]) => {
-      pendingWidth = Math.max(320, Math.floor(entry.contentRect.width));
+      pendingWidth = Math.max(240, Math.floor(entry.contentRect.width));
       if (!initialized) {
         initialized = true;
         setPhysicalWidth(pendingWidth);
@@ -185,28 +375,33 @@ export function ScoreRenderer({ score, selectedPartId, viewMode, zoom, onSelectP
 
   useEffect(() => {
     let disposed = false;
+    const requestId = ++engravingRequestRef.current;
     async function draw() {
       const host = hostRef.current;
       if (!host) return;
       host.replaceChildren();
       if (!rows.length) {
-        setRenderError("");
+        if (!disposed && requestId === engravingRequestRef.current && hostRef.current === host) {
+          setEngravingState({ source: engravingSource, measureLayouts: [], eventLayouts: [], error: "" });
+        }
         return;
       }
       try {
         const { Accidental, Articulation, Beam, Dot, Formatter, Fraction, GhostNote, ModifierPosition, Renderer, Stave, StaveConnector, StaveNote, StaveTie, TextDynamics, Voice } = await import("vexflow/bravura");
-        if (disposed || !hostRef.current) return;
+        if (disposed || requestId !== engravingRequestRef.current || hostRef.current !== host) return;
         const renderer = new Renderer(host, Renderer.Backends.SVG);
-        renderer.resize(renderWidth, renderHeight);
+        renderer.resize(engravingWidth, renderHeight);
         const context = renderer.getContext();
         context.setFillStyle("#25251f");
         context.setStrokeStyle("#30302a");
         const noteRefs = new Map<string, { note: StaveNote; index: number; systemIndex: number }>();
         const tiedDestinations = new Set(score.ties.map((tie) => tie.toNoteId));
         const absoluteIndex = new Map(score.measureOrder.map((measureId, index) => [measureId, index]));
+        const nextMeasureLayouts: MeasureScreenLayout[] = [];
+        const nextEventLayouts: EventScreenLayout[] = [];
 
         systems.forEach((system, systemIndex) => {
-          const yBase = 18 + systemIndex * systemHeight;
+          const yBase = TOP_PADDING + systemIndex * systemHeight;
           const stavesByMeasure: VexStave[][] = system.measureIds.map(() => []);
           const xPositions: number[] = [];
           let runningX = LABEL_WIDTH;
@@ -285,13 +480,19 @@ export function ScoreRenderer({ score, selectedPartId, viewMode, zoom, onSelectP
 
           system.measureIds.forEach((measureId, measureIndex) => {
             const measure = score.measures[measureId];
-            const cells: Array<{ voice: VexVoice; dynamicsVoice?: VexVoice; notes: StaveNote[]; beams: VexBeam[]; stave: VexStave }> = [];
+            const cells: Array<{ voice: VexVoice; dynamicsVoice?: VexVoice; notes: StaveNote[]; events: MusicEvent[]; eventTicks: number[]; placeholder: boolean; beams: VexBeam[]; stave: VexStave; row: RenderRow }> = [];
 
             rows.forEach((row) => {
               const stave = stavesByMeasure[measureIndex][row.rowIndex];
               const voiceData = getStaffVoice(row, measureId);
               const isEmptyMeasure = voiceData.events.length === 0;
               const sourceEvents: MusicEvent[] = isEmptyMeasure ? [{ id: `placeholder-${row.staff.id}-${measureId}`, kind: "rest", duration: { base: 1, dots: 0 } }] : voiceData.events;
+              let runningTick = 0;
+              const eventTicks = sourceEvents.map((event) => {
+                const tick = runningTick;
+                runningTick += durationTicks(event.duration);
+                return tick;
+              });
               const writtenKey = writtenKeyForPart(measure.key, row.part);
               const accidentals = resolveMeasureAccidentals(sourceEvents, writtenKey, tiedDestinations);
               const notes = sourceEvents.map((event) => {
@@ -344,18 +545,57 @@ export function ScoreRenderer({ score, selectedPartId, viewMode, zoom, onSelectP
               const beams = Beam.generateBeams(notes, {
                 groups: getDefaultBeamGroups(measure.time).map((group) => new Fraction(group.numerator, group.denominator)),
               });
-              cells.push({ voice, dynamicsVoice, notes, beams, stave });
+              cells.push({ voice, dynamicsVoice, notes, events: sourceEvents, eventTicks, placeholder: isEmptyMeasure, beams, stave, row });
             });
 
             const noteStartX = Math.max(...cells.map((cell) => cell.stave.getNoteStartX()));
             cells.forEach((cell) => cell.stave.setNoteStartX(noteStartX));
-            const justifyWidth = Math.max(24, cells[0].stave.getNoteEndX() - noteStartX);
+            const noteEndX = Math.min(...cells.map((cell) => cell.stave.getNoteEndX()));
+            const justifyWidth = Math.max(24, noteEndX - noteStartX - Stave.defaultPadding);
             const voices = cells.flatMap((cell) => cell.dynamicsVoice ? [cell.voice, cell.dynamicsVoice] : [cell.voice]);
             new Formatter().joinVoices(voices).format(voices, justifyWidth, { context });
+            const anchorXs = new Map<number, number[]>();
+            cells.filter((cell) => !cell.placeholder).forEach((cell) => cell.notes.forEach((note, noteIndex) => {
+              const tick = cell.eventTicks[noteIndex];
+              const x = (note.getNoteHeadBeginX() + note.getNoteHeadEndX()) / 2;
+              anchorXs.set(tick, [...(anchorXs.get(tick) ?? []), x]);
+            }));
+            const tickAnchors = [...anchorXs.entries()]
+              .sort(([left], [right]) => left - right)
+              .map(([tick, xs]) => ({ tick, x: xs.reduce((sum, x) => sum + x, 0) / xs.length }));
+            nextMeasureLayouts.push({
+              measureId,
+              systemIndex,
+              startX: noteStartX,
+              endX: noteEndX - Stave.defaultPadding,
+              top: TOP_PADDING + systemIndex * systemHeight + 5,
+              height: Math.max(56, rows.length * ROW_HEIGHT - 10),
+              tickAnchors,
+            });
             cells.forEach((cell) => {
               cell.voice.draw(context, cell.stave);
               cell.dynamicsVoice?.draw(context, cell.stave);
               cell.beams.forEach((beam) => beam.setContext(context).draw());
+              if (!cell.placeholder) {
+                cell.notes.forEach((note, noteIndex) => {
+                  const bounds = note.getBoundingBox();
+                  const noteHeadStart = note.getNoteHeadBeginX();
+                  const noteHeadEnd = note.getNoteHeadEndX();
+                  const x = Math.min(bounds.x, noteHeadStart) - 7;
+                  const width = Math.max(bounds.w, noteHeadEnd - noteHeadStart, 12) + 14;
+                  nextEventLayouts.push({
+                    partId: cell.row.part.id,
+                    staffId: cell.row.staff.id,
+                    measureId,
+                    eventId: cell.events[noteIndex].id,
+                    systemIndex,
+                    x,
+                    y: bounds.y - 7,
+                    width,
+                    height: Math.max(bounds.h, 30) + 14,
+                  });
+                });
+              }
             });
           });
         });
@@ -371,20 +611,55 @@ export function ScoreRenderer({ score, selectedPartId, viewMode, zoom, onSelectP
             new StaveTie({ firstNote: null, lastNote: last.note, firstIndexes: [last.index], lastIndexes: [last.index] }).setContext(context).draw();
           }
         });
-        setRenderError("");
+        if (!disposed && requestId === engravingRequestRef.current && hostRef.current === host) {
+          setEngravingState({
+            source: engravingSource,
+            measureLayouts: nextMeasureLayouts,
+            eventLayouts: nextEventLayouts,
+            error: "",
+          });
+        }
       } catch (error) {
-        setRenderError(error instanceof Error ? error.message : "The score could not be engraved.");
+        if (disposed || requestId !== engravingRequestRef.current || hostRef.current !== host) return;
+        host.replaceChildren();
+        setEngravingState({
+          source: engravingSource,
+          measureLayouts: [],
+          eventLayouts: [],
+          error: error instanceof Error ? error.message : "The score could not be engraved.",
+        });
       }
     }
     void draw();
     return () => { disposed = true; };
-  }, [partGroups, renderHeight, renderWidth, rows, score, systemHeight, systems]);
+  }, [engravingSource, engravingWidth, partGroups, renderHeight, rows, score, systemHeight, systems]);
 
   const handleClick = (event: React.MouseEvent<HTMLElement>) => {
-    if (!rows.length) return;
+    if (!rows.length || !layoutsAreCurrent) return;
     const rect = event.currentTarget.getBoundingClientRect();
+    const localX = (event.clientX - rect.left) / scale;
     const localY = (event.clientY - rect.top) / scale;
-    const scoreY = localY - 18;
+    const directHit = eventLayouts
+      .map((layout) => ({
+        layout,
+        distance: pointToRectDistance(localX, localY, layout),
+        centerDistance: pointToRectCenterDistance(localX, localY, layout),
+      }))
+      .filter(({ distance }) => distance === 0)
+      .sort((left, right) => left.centerDistance - right.centerDistance)[0]?.layout;
+    if (directHit) {
+      onSelectPart(directHit.partId);
+      onSelectStaff?.(directHit.staffId);
+      onSelectEvent?.({
+        partId: directHit.partId,
+        staffId: directHit.staffId,
+        measureId: directHit.measureId,
+        eventId: directHit.eventId,
+      });
+      return;
+    }
+
+    const scoreY = localY - TOP_PADDING;
     if (scoreY < 0) return;
     const systemIndex = Math.floor(scoreY / systemHeight);
     if (systemIndex < 0 || systemIndex >= systems.length) return;
@@ -393,6 +668,23 @@ export function ScoreRenderer({ score, selectedPartId, viewMode, zoom, onSelectP
     const row = rows[Math.floor(withinSystem / ROW_HEIGHT)];
     onSelectPart(row.part.id);
     onSelectStaff?.(row.staff.id);
+    const nearest = eventLayouts
+      .filter((layout) => (
+        layout.partId === row.part.id && layout.staffId === row.staff.id && layout.systemIndex === systemIndex
+      ))
+      .map((layout) => ({
+        layout,
+        distance: pointToRectDistance(localX, localY, layout),
+        centerDistance: pointToRectCenterDistance(localX, localY, layout),
+      }))
+      .filter(({ distance }) => distance <= 22 / scale)
+      .sort((left, right) => left.distance - right.distance || left.centerDistance - right.centerDistance)[0]?.layout;
+    onSelectEvent?.(nearest ? {
+      partId: nearest.partId,
+      staffId: nearest.staffId,
+      measureId: nearest.measureId,
+      eventId: nearest.eventId,
+    } : null);
   };
 
   const selectedStaffRow = selectedStaffId ? rows.find((row) => row.staff.id === selectedStaffId) : undefined;
@@ -402,10 +694,86 @@ export function ScoreRenderer({ score, selectedPartId, viewMode, zoom, onSelectP
       ? rows.filter((row) => row.part.id === selectedPartId)
       : [];
   const keyboardRow = selectedStaffRow ?? rows.find((row) => row.part.id === selectedPartId) ?? rows[0];
+  const playbackPosition = useMemo(
+    () => playbackSeconds === null ? null : locatePlaybackPosition(score, playbackSeconds),
+    [playbackSeconds, score],
+  );
+  const playbackLayout = playbackPosition
+    ? measureLayouts.find((layout) => layout.measureId === playbackPosition.measureId)
+    : undefined;
+  const playbackCursor = useMemo(() => playbackPosition && playbackLayout ? {
+    ...playbackLayout,
+    x: xForMeasureTick(playbackLayout, playbackPosition.tickInMeasure, measureCapacity(score.measures[playbackPosition.measureId])),
+    label: `m. ${playbackPosition.measureNumber} · beat ${playbackPosition.beat}`,
+  } : null, [playbackLayout, playbackPosition, score.measures]);
+  const entryLayout = entryMeasureId ? measureLayouts.find((layout) => layout.measureId === entryMeasureId) : undefined;
+  const entryMeasure = entryMeasureId ? score.measures[entryMeasureId] : undefined;
+  const entryCursor = playbackSeconds === null && entryLayout && selectedStaffRow ? {
+    x: xForMeasureTick(entryLayout, entryTick, entryMeasure ? measureCapacity(entryMeasure) : 0),
+    top: TOP_PADDING + entryLayout.systemIndex * systemHeight + selectedStaffRow.rowIndex * ROW_HEIGHT + 8,
+  } : null;
+  const entryCursorX = entryCursor?.x;
+  const entryCursorTop = entryCursor?.top;
+  const selectedEventLayout = selectedEventId ? eventLayouts.find((layout) => layout.eventId === selectedEventId) : undefined;
+
+  useEffect(() => {
+    if (!layoutsAreCurrent || inputFollowRevision === completedInputFollowRef.current) return;
+    const selectedRect = selectedEventLayout;
+    const caretRect = entryCursorX !== undefined && entryCursorTop !== undefined
+      ? { x: entryCursorX - 1, y: entryCursorTop, width: 2, height: 70 }
+      : undefined;
+    const target = selectedRect && caretRect
+      ? {
+        x: Math.min(selectedRect.x, caretRect.x),
+        y: Math.min(selectedRect.y, caretRect.y),
+        width: Math.max(selectedRect.x + selectedRect.width, caretRect.x + caretRect.width) - Math.min(selectedRect.x, caretRect.x),
+        height: Math.max(selectedRect.y + selectedRect.height, caretRect.y + caretRect.height) - Math.min(selectedRect.y, caretRect.y),
+      }
+      : selectedRect ?? caretRect;
+    if (!target) return;
+    completedInputFollowRef.current = inputFollowRevision;
+    scrollScreenRectIntoView(frameRef.current, target, scale);
+  }, [entryCursorTop, entryCursorX, inputFollowRevision, layoutsAreCurrent, scale, selectedEventLayout]);
+
+  useEffect(() => {
+    if (!layoutsAreCurrent || !playbackCursor) return;
+    scrollScreenRectIntoView(frameRef.current, {
+      x: playbackCursor.x - 1,
+      y: playbackCursor.top,
+      width: 2,
+      height: playbackCursor.height,
+    }, scale);
+  }, [layoutsAreCurrent, playbackCursor, scale]);
+
   const handleRowKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
-    if (event.key !== "ArrowUp" && event.key !== "ArrowDown" && event.key !== "Enter") return;
+    if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter"].includes(event.key)) return;
     event.preventDefault();
     event.stopPropagation();
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      if (!layoutsAreCurrent) return;
+      const rowEvents = eventLayouts
+        .filter((layout) => layout.partId === keyboardRow.part.id && layout.staffId === keyboardRow.staff.id)
+        .sort((left, right) => left.systemIndex - right.systemIndex || left.x - right.x);
+      if (!rowEvents.length) {
+        onSelectEvent?.(null);
+        return;
+      }
+      const selectedIndex = rowEvents.findIndex((layout) => layout.eventId === selectedEventId);
+      const nextIndex = selectedIndex < 0
+        ? event.key === "ArrowLeft" ? rowEvents.length - 1 : 0
+        : event.key === "ArrowLeft"
+          ? Math.max(0, selectedIndex - 1)
+          : Math.min(rowEvents.length - 1, selectedIndex + 1);
+      const nextEvent = rowEvents[nextIndex];
+      onSelectEvent?.({
+        partId: nextEvent.partId,
+        staffId: nextEvent.staffId,
+        measureId: nextEvent.measureId,
+        eventId: nextEvent.eventId,
+      });
+      scrollScreenRectIntoView(frameRef.current, nextEvent, scale);
+      return;
+    }
     const currentIndex = Math.max(0, rows.indexOf(keyboardRow));
     const nextIndex = event.key === "ArrowUp"
       ? Math.max(0, currentIndex - 1)
@@ -416,23 +784,51 @@ export function ScoreRenderer({ score, selectedPartId, viewMode, zoom, onSelectP
     if (!next) return;
     onSelectPart(next.part.id);
     onSelectStaff?.(next.staff.id);
+    if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+      scrollStaffRowIntoView(frameRef.current, next.rowIndex, systems.length, systemHeight, engravingWidth, scale);
+    }
   };
   const scoreControlLabel = keyboardRow
-    ? `${score.metadata.title}. ${countLabel(score.parts.length, "part")}, ${countLabel(score.measureOrder.length, "measure")}. Selected ${keyboardRow.part.name}, staff ${keyboardRow.staffIndex + 1}, ${keyboardRow.staff.clef} clef. Use the Up and Down Arrow keys to select a staff; use A through G to enter notes.`
+    ? `${score.metadata.title}. ${countLabel(score.parts.length, "part")}, ${countLabel(score.measureOrder.length, "measure")}. Selected ${keyboardRow.part.name}, staff ${keyboardRow.staffIndex + 1}, ${keyboardRow.staff.clef} clef. Click or tap a note or rest to select it for deletion. Use the Left and Right Arrow keys to select events, the Up and Down Arrow keys to select a staff, and A through G to enter notes.`
     : `${score.metadata.title}. No editable staff rows.`;
+  const engravingSurfaceStyle = {
+    width: `${engravingWidth}px`,
+    height: `${renderHeight}px`,
+    transform: `scale(${scale})`,
+    "--engraving-ui-scale": 1 / scale,
+  } as React.CSSProperties;
 
   return (
     <div ref={frameRef} className="engraving-frame" style={{ height: `${renderHeight * scale}px` }}>
-      <div className="engraving-surface" style={{ width: `${renderWidth}px`, height: `${renderHeight}px`, transform: `scale(${scale})` }}>
-        {systems.flatMap((_, systemIndex) => highlightedRows.map((row) => (
-          <div
-            className="staff-selection"
-            key={`${systemIndex}-${row.staff.id}`}
-            style={{ top: 18 + systemIndex * systemHeight + row.rowIndex * ROW_HEIGHT, height: ROW_HEIGHT }}
-          />
-        )))}
-        <div ref={hostRef} className="vexflow-host" aria-hidden="true" />
-        <button type="button" className="score-hit-target" onClick={handleClick} onKeyDown={handleRowKeyDown} aria-label={scoreControlLabel} />
+      <div className="engraving-scroll-size" style={{ width: `${engravingWidth * scale}px`, height: `${renderHeight * scale}px` }}>
+        <div className="engraving-surface" style={engravingSurfaceStyle}>
+          {systems.flatMap((_, systemIndex) => highlightedRows.map((row) => (
+            <div
+              className="staff-selection"
+              key={`${systemIndex}-${row.staff.id}`}
+              style={{ top: TOP_PADDING + systemIndex * systemHeight + row.rowIndex * ROW_HEIGHT, height: ROW_HEIGHT }}
+            />
+          )))}
+          {selectedEventLayout ? (
+            <div
+              className="event-selection"
+              style={{ left: selectedEventLayout.x, top: selectedEventLayout.y, width: selectedEventLayout.width, height: selectedEventLayout.height }}
+              aria-hidden="true"
+            />
+          ) : null}
+          {entryCursor ? (
+            <div className="entry-caret" style={{ left: entryCursor.x, top: entryCursor.top }} aria-hidden="true"><span>NEXT</span></div>
+          ) : null}
+          {playbackCursor ? (
+            <div
+              className="notation-playhead"
+              style={{ left: playbackCursor.x, top: playbackCursor.top, height: playbackCursor.height }}
+              aria-hidden="true"
+            ><span>{playbackCursor.label}</span></div>
+          ) : null}
+          <div ref={hostRef} className="vexflow-host" aria-hidden="true" />
+          <button type="button" className="score-hit-target" onClick={handleClick} onKeyDown={handleRowKeyDown} aria-label={scoreControlLabel} />
+        </div>
       </div>
       {renderError ? <div className="engraving-error" role="alert">{renderError}</div> : null}
     </div>

@@ -242,6 +242,8 @@ interface TimedNote {
   velocity: number;
   startTicks: number;
   durationTicks: number;
+  /** Rhythmic span before articulation and live-playback gate shortening. */
+  notatedDurationTicks: number;
   articulation?: Articulation;
 }
 
@@ -293,6 +295,7 @@ function collectTimedNotes(score: ScoreDocument): TimedNote[] {
               velocity: performedVelocity,
               startTicks: cursor,
               durationTicks: ticks,
+              notatedDurationTicks: ticks,
               articulation: event.articulation,
             }));
           }
@@ -318,6 +321,7 @@ function collectTimedNotes(score: ScoreDocument): TimedNote[] {
       if (!next || visited.has(nextId) || next.partId !== root.partId || next.midi !== root.midi || tail.startTicks + tail.durationTicks !== next.startTicks) break;
       visited.add(nextId);
       root.durationTicks = next.startTicks + next.durationTicks - root.startTicks;
+      root.notatedDurationTicks = next.startTicks + next.notatedDurationTicks - root.startTicks;
       merged.add(nextId);
       tail = next;
     }
@@ -434,7 +438,16 @@ export function scoreToMidi(score: ScoreDocument): Uint8Array {
   return new Uint8Array([...header, ...tracks.flat()]);
 }
 
-export interface PlaybackNote { partId: string; midi: number; velocity: number; startSeconds: number; durationSeconds: number; }
+export interface PlaybackNote {
+  partId: string;
+  midi: number;
+  velocity: number;
+  startSeconds: number;
+  /** Audible oscillator gate, shortened for separation and staccato. */
+  durationSeconds: number;
+  /** Rhythmic note span used by the engraved playhead. */
+  notatedDurationSeconds: number;
+}
 
 export function collectPlaybackNotes(score: ScoreDocument): PlaybackNote[] {
   const secondsPerTick = 60 / score.tempo / 960;
@@ -446,6 +459,7 @@ export function collectPlaybackNotes(score: ScoreDocument): PlaybackNote[] {
     velocity: note.velocity,
     startSeconds: note.startTicks * secondsPerTick,
     durationSeconds: Math.max(.005, note.durationTicks * secondsPerTick * .9),
+    notatedDurationSeconds: note.notatedDurationTicks * secondsPerTick,
   }));
 }
 

@@ -691,6 +691,362 @@ export function removeLastChordTone(
   };
 }
 
+interface ExactEventTarget {
+  partIndex: number;
+  staffIndex: number;
+  staffId: string;
+  voiceIndex: number;
+  eventIndex: number;
+  event: MusicEvent;
+}
+
+type ExactEventTargetResult = { target: ExactEventTarget; error?: undefined } | { target?: undefined; error: string };
+
+function findExactEventTarget(
+  score: ScoreDocument,
+  partId: string,
+  staffIdOrIndex: StaffSelector,
+  measureId: string,
+  eventId: string,
+): ExactEventTargetResult {
+  const partIndex = score.parts.findIndex((candidate) => candidate.id === partId);
+  if (partIndex < 0) return { error: `Instrument part "${partId}" does not exist.` };
+  const part = score.parts[partIndex];
+  const staffIndex = resolveStaffIndex(part, staffIdOrIndex);
+  if (staffIndex < 0) {
+    return { error: `Staff selector "${String(staffIdOrIndex)}" does not identify a staff on instrument part "${partId}".` };
+  }
+  if (!score.measureOrder.includes(measureId) || !score.measures[measureId]) {
+    return { error: `Measure "${measureId}" does not exist in this score.` };
+  }
+
+  const staff = part.staves[staffIndex];
+  const staffMeasure = staff.measures[measureId];
+  if (!staffMeasure) return { error: `Staff "${staff.id}" is missing measure "${measureId}".` };
+  const matches = staffMeasure.voices.flatMap((voice, voiceIndex) =>
+    voice.events.flatMap((event, eventIndex) => event.id === eventId ? [{ voiceIndex, eventIndex, event }] : []),
+  );
+  if (!matches.length) return { error: `Event "${eventId}" does not exist in measure "${measureId}" on staff "${staff.id}".` };
+  if (matches.length > 1) return { error: `Event ID "${eventId}" is ambiguous in measure "${measureId}" on staff "${staff.id}".` };
+  return { target: { partIndex, staffIndex, staffId: staff.id, ...matches[0] } };
+}
+
+/** Adds one written pitch to exactly one selected note event without advancing musical time. */
+export function addChordToneToEvent(
+  score: ScoreDocument,
+  partId: string,
+  staffIdOrIndex: StaffSelector,
+  measureId: string,
+  eventId: string,
+  note: ScoreNote,
+): AddChordToneResult {
+  const located = findExactEventTarget(score, partId, staffIdOrIndex, measureId, eventId);
+  if (!located.target) {
+    return { score, added: false, measureId, eventId, noteId: null, error: located.error };
+  }
+  if (located.target.event.kind === "rest") {
+    return {
+      score,
+      added: false,
+      measureId,
+      eventId,
+      noteId: null,
+      error: `Event "${eventId}" in measure "${measureId}" on staff "${located.target.staffId}" is a rest and cannot receive a chord tone.`,
+    };
+  }
+  const sameWrittenPitch = located.target.event.notes.some((existing) =>
+    existing.pitch.step === note.pitch.step
+    && existing.pitch.alter === note.pitch.alter
+    && existing.pitch.octave === note.pitch.octave,
+  );
+  if (sameWrittenPitch) {
+    return { score, added: false, measureId, eventId, noteId: null, error: "That written pitch is already in the chord." };
+  }
+  const noteIdInUse = score.parts.some((candidatePart) => candidatePart.staves.some((staff) =>
+    Object.values(staff.measures).some((measure) => measure.voices.some((voice) => voice.events.some((event) =>
+      event.kind === "note" && event.notes.some((existing) => existing.id === note.id),
+    ))),
+  ));
+  if (noteIdInUse) {
+    return { score, added: false, measureId, eventId, noteId: null, error: "That chord-tone ID is already in use." };
+  }
+
+  const next = structuredClone(score);
+  const nextEvent = next.parts[located.target.partIndex].staves[located.target.staffIndex]
+    .measures[measureId].voices[located.target.voiceIndex].events[located.target.eventIndex];
+  if (nextEvent.kind !== "note") {
+    return { score, added: false, measureId, eventId, noteId: null, error: `Event "${eventId}" is not available for chord entry.` };
+  }
+  nextEvent.notes.push(structuredClone(note));
+  return { score: stamp(next), added: true, measureId, eventId, noteId: note.id };
+}
+
+/** Removes only the last tone from exactly one selected chord without changing its duration. */
+export function removeChordToneFromEvent(
+  score: ScoreDocument,
+  partId: string,
+  staffIdOrIndex: StaffSelector,
+  measureId: string,
+  eventId: string,
+): RemoveLastChordToneResult {
+  const located = findExactEventTarget(score, partId, staffIdOrIndex, measureId, eventId);
+  if (!located.target) {
+    return { score, removed: false, measureId, eventId, removedNote: null, remainingNoteCount: null, error: located.error };
+  }
+  if (located.target.event.kind === "rest") {
+    return {
+      score,
+      removed: false,
+      measureId,
+      eventId,
+      removedNote: null,
+      remainingNoteCount: null,
+      error: `Event "${eventId}" in measure "${measureId}" on staff "${located.target.staffId}" is a rest, not a chord.`,
+    };
+  }
+  if (located.target.event.notes.length < 2) {
+    return {
+      score,
+      removed: false,
+      measureId,
+      eventId,
+      removedNote: null,
+      remainingNoteCount: null,
+      error: "The selected note event needs at least two tones before a chord tone can be removed.",
+    };
+  }
+
+  const next = structuredClone(score);
+  const nextEvent = next.parts[located.target.partIndex].staves[located.target.staffIndex]
+    .measures[measureId].voices[located.target.voiceIndex].events[located.target.eventIndex];
+  if (nextEvent.kind !== "note" || nextEvent.notes.length < 2) {
+    return {
+      score,
+      removed: false,
+      measureId,
+      eventId,
+      removedNote: null,
+      remainingNoteCount: null,
+      error: `Event "${eventId}" is not available for chord-tone removal.`,
+    };
+  }
+  const removedNote = nextEvent.notes.pop()!;
+  next.ties = next.ties.filter((tie) => tie.fromNoteId !== removedNote.id && tie.toNoteId !== removedNote.id);
+  return {
+    score: stamp(next),
+    removed: true,
+    measureId,
+    eventId,
+    removedNote,
+    remainingNoteCount: nextEvent.notes.length,
+  };
+}
+
+export type ClearEventToRestResult =
+  | {
+      score: ScoreDocument;
+      changed: true;
+      measureId: string;
+      eventId: string;
+      removedTieIds: string[];
+      error?: undefined;
+    }
+  | {
+      score: ScoreDocument;
+      changed: false;
+      measureId: string;
+      eventId: string;
+      removedTieIds: [];
+      error: string;
+    };
+
+/** Replaces exactly one selected note or chord with an equal-duration rest, preserving its timeline slot. */
+export function clearEventToRest(
+  score: ScoreDocument,
+  partId: string,
+  staffIdOrIndex: StaffSelector,
+  measureId: string,
+  eventId: string,
+): ClearEventToRestResult {
+  const located = findExactEventTarget(score, partId, staffIdOrIndex, measureId, eventId);
+  if (!located.target) {
+    return { score, changed: false, measureId, eventId, removedTieIds: [], error: located.error };
+  }
+  if (located.target.event.kind === "rest") {
+    return {
+      score,
+      changed: false,
+      measureId,
+      eventId,
+      removedTieIds: [],
+      error: `Event "${eventId}" in measure "${measureId}" on staff "${located.target.staffId}" is already a rest.`,
+    };
+  }
+
+  const removedNoteIds = new Set(located.target.event.notes.map((note) => note.id));
+  const removedTieIds = score.ties
+    .filter((tie) => removedNoteIds.has(tie.fromNoteId) || removedNoteIds.has(tie.toNoteId))
+    .map((tie) => tie.id);
+  const next = structuredClone(score);
+  const nextEvents = next.parts[located.target.partIndex].staves[located.target.staffIndex]
+    .measures[measureId].voices[located.target.voiceIndex].events;
+  const nextEvent = nextEvents[located.target.eventIndex];
+  if (nextEvent.kind !== "note") {
+    return {
+      score,
+      changed: false,
+      measureId,
+      eventId,
+      removedTieIds: [],
+      error: `Event "${eventId}" is not available for clearing to a rest.`,
+    };
+  }
+  nextEvents[located.target.eventIndex] = {
+    id: nextEvent.id,
+    kind: "rest",
+    duration: nextEvent.duration,
+    ...(nextEvent.dynamic === undefined ? {} : { dynamic: nextEvent.dynamic }),
+  };
+  next.ties = next.ties.filter((tie) => !removedNoteIds.has(tie.fromNoteId) && !removedNoteIds.has(tie.toNoteId));
+  return { score: stamp(next), changed: true, measureId, eventId, removedTieIds };
+}
+
+export type SetEventDynamicResult =
+  | {
+      score: ScoreDocument;
+      changed: boolean;
+      measureId: string;
+      eventId: string;
+      previousDynamic: DynamicMarking | null;
+      dynamic: DynamicMarking | null;
+      error?: undefined;
+    }
+  | {
+      score: ScoreDocument;
+      changed: false;
+      measureId: string;
+      eventId: string;
+      previousDynamic: null;
+      dynamic: DynamicMarking | null;
+      error: string;
+    };
+
+/** Attaches, replaces, or clears a dynamic on exactly one selected note or rest event. */
+export function setEventDynamic(
+  score: ScoreDocument,
+  partId: string,
+  staffIdOrIndex: StaffSelector,
+  measureId: string,
+  eventId: string,
+  dynamic: DynamicMarking | null,
+): SetEventDynamicResult {
+  if (dynamic !== null && !DYNAMIC_MARKINGS.includes(dynamic)) {
+    return {
+      score,
+      changed: false,
+      measureId,
+      eventId,
+      previousDynamic: null,
+      dynamic,
+      error: "Choose ppp, pp, p, mp, mf, f, ff, fff, or none.",
+    };
+  }
+  const located = findExactEventTarget(score, partId, staffIdOrIndex, measureId, eventId);
+  if (!located.target) {
+    return { score, changed: false, measureId, eventId, previousDynamic: null, dynamic, error: located.error };
+  }
+
+  const previousDynamic = located.target.event.dynamic ?? null;
+  if (previousDynamic === dynamic) {
+    return { score, changed: false, measureId, eventId, previousDynamic, dynamic };
+  }
+  const next = structuredClone(score);
+  const nextEvent = next.parts[located.target.partIndex].staves[located.target.staffIndex]
+    .measures[measureId].voices[located.target.voiceIndex].events[located.target.eventIndex];
+  if (dynamic === null) delete nextEvent.dynamic;
+  else nextEvent.dynamic = dynamic;
+  return { score: stamp(next), changed: true, measureId, eventId, previousDynamic, dynamic };
+}
+
+export type SetEventArticulationResult =
+  | {
+      score: ScoreDocument;
+      changed: boolean;
+      measureId: string;
+      eventId: string;
+      previousArticulation: Articulation | null;
+      articulation: Articulation | null;
+      error?: undefined;
+    }
+  | {
+      score: ScoreDocument;
+      changed: false;
+      measureId: string;
+      eventId: string;
+      previousArticulation: null;
+      articulation: Articulation | null;
+      error: string;
+    };
+
+/** Attaches, replaces, or clears an articulation on exactly one selected note event. */
+export function setEventArticulation(
+  score: ScoreDocument,
+  partId: string,
+  staffIdOrIndex: StaffSelector,
+  measureId: string,
+  eventId: string,
+  articulation: Articulation | null,
+): SetEventArticulationResult {
+  if (articulation !== null && !ARTICULATIONS.includes(articulation)) {
+    return {
+      score,
+      changed: false,
+      measureId,
+      eventId,
+      previousArticulation: null,
+      articulation,
+      error: "Choose staccato, tenuto, accent, marcato, or none.",
+    };
+  }
+  const located = findExactEventTarget(score, partId, staffIdOrIndex, measureId, eventId);
+  if (!located.target) {
+    return { score, changed: false, measureId, eventId, previousArticulation: null, articulation, error: located.error };
+  }
+  if (located.target.event.kind !== "note") {
+    return {
+      score,
+      changed: false,
+      measureId,
+      eventId,
+      previousArticulation: null,
+      articulation,
+      error: `Event "${eventId}" in measure "${measureId}" on staff "${located.target.staffId}" is a rest and cannot have an articulation.`,
+    };
+  }
+
+  const previousArticulation = located.target.event.articulation ?? null;
+  if (previousArticulation === articulation) {
+    return { score, changed: false, measureId, eventId, previousArticulation, articulation };
+  }
+  const next = structuredClone(score);
+  const nextEvent = next.parts[located.target.partIndex].staves[located.target.staffIndex]
+    .measures[measureId].voices[located.target.voiceIndex].events[located.target.eventIndex];
+  if (nextEvent.kind !== "note") {
+    return {
+      score,
+      changed: false,
+      measureId,
+      eventId,
+      previousArticulation: null,
+      articulation,
+      error: `Event "${eventId}" is not available for articulation editing.`,
+    };
+  }
+  if (articulation === null) delete nextEvent.articulation;
+  else nextEvent.articulation = articulation;
+  return { score: stamp(next), changed: true, measureId, eventId, previousArticulation, articulation };
+}
+
 export type SetLastEventDynamicResult =
   | {
       score: ScoreDocument;
@@ -885,6 +1241,133 @@ export function setLastNoteArticulation(
     previousArticulation: null,
     articulation,
     error: "Enter a note before adding an articulation.",
+  };
+}
+
+export type RemoveEventResult =
+  | {
+      score: ScoreDocument;
+      removed: true;
+      measureId: string;
+      eventId: string;
+      removedEvent: MusicEvent;
+      removedTieIds: string[];
+      error?: undefined;
+    }
+  | {
+      score: ScoreDocument;
+      removed: false;
+      measureId: string;
+      eventId: string;
+      removedEvent: null;
+      removedTieIds: [];
+      error: string;
+    };
+
+/** Removes exactly one selected event and any ties connected to its note IDs. */
+export function removeEvent(
+  score: ScoreDocument,
+  partId: string,
+  staffIdOrIndex: StaffSelector,
+  measureId: string,
+  eventId: string,
+): RemoveEventResult {
+  const part = score.parts.find((candidate) => candidate.id === partId);
+  if (!part) {
+    return {
+      score,
+      removed: false,
+      measureId,
+      eventId,
+      removedEvent: null,
+      removedTieIds: [],
+      error: `Instrument part "${partId}" does not exist.`,
+    };
+  }
+
+  const staffIndex = resolveStaffIndex(part, staffIdOrIndex);
+  if (staffIndex < 0) {
+    return {
+      score,
+      removed: false,
+      measureId,
+      eventId,
+      removedEvent: null,
+      removedTieIds: [],
+      error: `Staff selector "${String(staffIdOrIndex)}" does not identify a staff on instrument part "${partId}".`,
+    };
+  }
+
+  if (!score.measureOrder.includes(measureId) || !score.measures[measureId]) {
+    return {
+      score,
+      removed: false,
+      measureId,
+      eventId,
+      removedEvent: null,
+      removedTieIds: [],
+      error: `Measure "${measureId}" does not exist in this score.`,
+    };
+  }
+
+  const staff = part.staves[staffIndex];
+  const staffMeasure = staff.measures[measureId];
+  if (!staffMeasure) {
+    return {
+      score,
+      removed: false,
+      measureId,
+      eventId,
+      removedEvent: null,
+      removedTieIds: [],
+      error: `Staff "${staff.id}" is missing measure "${measureId}".`,
+    };
+  }
+
+  const matches = staffMeasure.voices.flatMap((voice, voiceIndex) =>
+    voice.events.flatMap((event, eventIndex) => event.id === eventId ? [{ voiceIndex, eventIndex }] : []),
+  );
+  if (!matches.length) {
+    return {
+      score,
+      removed: false,
+      measureId,
+      eventId,
+      removedEvent: null,
+      removedTieIds: [],
+      error: `Event "${eventId}" does not exist in measure "${measureId}" on staff "${staff.id}".`,
+    };
+  }
+  if (matches.length > 1) {
+    return {
+      score,
+      removed: false,
+      measureId,
+      eventId,
+      removedEvent: null,
+      removedTieIds: [],
+      error: `Event ID "${eventId}" is ambiguous in measure "${measureId}" on staff "${staff.id}".`,
+    };
+  }
+
+  const [{ voiceIndex, eventIndex }] = matches;
+  const next = structuredClone(score);
+  const nextEvents = next.parts.find((candidate) => candidate.id === partId)!
+    .staves[staffIndex].measures[measureId].voices[voiceIndex].events;
+  const [removedEvent] = nextEvents.splice(eventIndex, 1);
+  const removedNoteIds = new Set(removedEvent.kind === "note" ? removedEvent.notes.map((note) => note.id) : []);
+  const removedTieIds = next.ties
+    .filter((tie) => removedNoteIds.has(tie.fromNoteId) || removedNoteIds.has(tie.toNoteId))
+    .map((tie) => tie.id);
+  next.ties = next.ties.filter((tie) => !removedNoteIds.has(tie.fromNoteId) && !removedNoteIds.has(tie.toNoteId));
+
+  return {
+    score: stamp(next),
+    removed: true,
+    measureId,
+    eventId,
+    removedEvent,
+    removedTieIds,
   };
 }
 

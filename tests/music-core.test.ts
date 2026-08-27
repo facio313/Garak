@@ -7,7 +7,8 @@ import { KEY_SIGNATURES, concertToWrittenKey, createWrittenKeySignatureSnapshot,
 import { getDefaultBeamGroups, getFullMeasureDuration } from "../lib/music/meter";
 import { ARTICULATIONS, DEFAULT_MIDI_VELOCITY, DURATION_LABELS, DYNAMIC_MARKINGS, DYNAMIC_VELOCITIES, TICKS_PER_QUARTER, durationTicks, eventCount, getPrimaryVoice, measureCapacity, nextAugmentationDotCount, validateScore, voiceTicks, writtenToSounding } from "../lib/music/model";
 import type { MusicEvent, Pitch, ScoreDocument, ScoreNote } from "../lib/music/model";
-import { addChordTone, addInstrument, appendEvent, appendMeasure, createScore, findEventTargetMeasureId, makeEvent, removeInstrument, removeLastChordTone, removeLastEvent, removeLastMeasure, setKeyFromMeasure, setLastEventDynamic, setLastNoteArticulation, setMeasureKey, setScoreKey, setTimeFromMeasure, toggleTieLastTwo } from "../lib/music/score";
+import { locatePlaybackPosition } from "../lib/music/playback-position";
+import { addChordTone, addChordToneToEvent, addInstrument, appendEvent, appendMeasure, clearEventToRest, createScore, findEventTargetMeasureId, makeEvent, removeChordToneFromEvent, removeEvent, removeInstrument, removeLastChordTone, removeLastEvent, removeLastMeasure, setEventArticulation, setEventDynamic, setKeyFromMeasure, setLastEventDynamic, setLastNoteArticulation, setMeasureKey, setScoreKey, setTimeFromMeasure, toggleTieLastTwo } from "../lib/music/score";
 
 test("duration and meter arithmetic stays exact", () => {
   assert.equal(durationTicks({ base: 1, dots: 0 }), TICKS_PER_QUARTER * 4);
@@ -34,6 +35,69 @@ test("duration and meter arithmetic stays exact", () => {
   const measure = score.measures[score.measureOrder[0]];
   measure.time = { numerator: 6, denominator: 8 };
   assert.equal(measureCapacity(measure), TICKS_PER_QUARTER * 3);
+});
+
+test("playback seconds map to exact measure and denominator-beat boundaries across meter changes", () => {
+  const score = createScore("solo", { seedDemo: false });
+  score.tempo = 120;
+  const [firstId, secondId, thirdId, fourthId] = score.measureOrder;
+  score.measures[firstId].time = { numerator: 4, denominator: 4 };
+  score.measures[secondId].time = { numerator: 6, denominator: 8 };
+  score.measures[thirdId].time = { numerator: 3, denominator: 4 };
+  score.measures[fourthId].time = { numerator: 5, denominator: 8 };
+
+  assert.deepEqual(locatePlaybackPosition(score, -10), {
+    measureId: firstId,
+    measureNumber: score.measures[firstId].number,
+    tickInMeasure: 0,
+    measureProgress: 0,
+    beat: 1,
+  });
+  assert.deepEqual(locatePlaybackPosition(score, Number.NaN), locatePlaybackPosition(score, 0));
+
+  const firstBeatTwo = locatePlaybackPosition(score, 0.5);
+  assert.equal(firstBeatTwo?.measureId, firstId);
+  assert.equal(firstBeatTwo?.tickInMeasure, TICKS_PER_QUARTER);
+  assert.equal(firstBeatTwo?.measureProgress, 0.25);
+  assert.equal(firstBeatTwo?.beat, 2);
+
+  const secondStart = locatePlaybackPosition(score, 2);
+  assert.equal(secondStart?.measureId, secondId, "an exact barline belongs to the following measure");
+  assert.equal(secondStart?.tickInMeasure, 0);
+  assert.equal(secondStart?.measureProgress, 0);
+  assert.equal(secondStart?.beat, 1);
+
+  const secondBeatTwo = locatePlaybackPosition(score, 2.25);
+  assert.equal(secondBeatTwo?.measureId, secondId);
+  assert.equal(secondBeatTwo?.tickInMeasure, TICKS_PER_QUARTER / 2);
+  assert.equal(secondBeatTwo?.beat, 2, "6/8 labels denominator eighth-note beats");
+
+  const secondMidpoint = locatePlaybackPosition(score, 2.75);
+  assert.equal(secondMidpoint?.measureId, secondId);
+  assert.equal(secondMidpoint?.measureProgress, 0.5);
+  assert.equal(secondMidpoint?.beat, 4);
+
+  const thirdStart = locatePlaybackPosition(score, 3.5);
+  assert.equal(thirdStart?.measureId, thirdId);
+  assert.equal(thirdStart?.tickInMeasure, 0);
+  assert.equal(thirdStart?.beat, 1);
+
+  const fourthStart = locatePlaybackPosition(score, 5);
+  assert.equal(fourthStart?.measureId, fourthId);
+  assert.equal(fourthStart?.tickInMeasure, 0);
+  assert.equal(fourthStart?.beat, 1);
+
+  const beyondScore = locatePlaybackPosition(score, 999);
+  assert.equal(beyondScore?.measureId, fourthId, "elapsed audio beyond the score clamps to its final measure");
+  assert.equal(beyondScore?.tickInMeasure, measureCapacity(score.measures[fourthId]));
+  assert.equal(beyondScore?.measureProgress, 1);
+  assert.equal(beyondScore?.beat, 5);
+});
+
+test("playback position returns null when a score has no ordered measures", () => {
+  const score = createScore("solo", { seedDemo: false });
+  score.measureOrder = [];
+  assert.equal(locatePlaybackPosition(score, 0), null);
 });
 
 test("meter helpers provide exact default beam groups and full-measure durations", () => {
@@ -728,6 +792,207 @@ test("staff-targeted entry, deletion, ties, counts, and auto-append stay isolate
   assert.ok(appended.score.parts[0].staves.every((staff) => staff.measures[appended.measureId!]?.voices.length === 1));
 });
 
+test("selected event removal deletes the exact middle event, preserves other cells, and cleans only connected ties", () => {
+  const source = createScore("solo", { seedDemo: false });
+  const part = source.parts[0];
+  const upperStaff = part.staves[0];
+  const lowerStaff = part.staves[1];
+  const [otherMeasureId, targetMeasureId] = source.measureOrder;
+  const before = makeEvent({ id: "selected-before", pitch: { step: "C", alter: 0, octave: 3 }, duration: { base: 4, dots: 0 }, rest: false });
+  const target = makeEvent({ id: "selected-middle", pitch: { step: "C", alter: 0, octave: 3 }, duration: { base: 4, dots: 0 }, rest: false });
+  const after = makeEvent({ id: "selected-after", pitch: { step: "C", alter: 0, octave: 3 }, duration: { base: 4, dots: 0 }, rest: false });
+  const otherMeasureEvent = makeEvent({ id: "other-measure-event", pitch: { step: "F", alter: 0, octave: 3 }, duration: { base: 2, dots: 0 }, rest: false });
+  const upperFrom = makeEvent({ id: "upper-unrelated-from", pitch: { step: "G", alter: 0, octave: 4 }, duration: { base: 4, dots: 0 }, rest: false });
+  const upperTo = makeEvent({ id: "upper-unrelated-to", pitch: { step: "G", alter: 0, octave: 4 }, duration: { base: 4, dots: 0 }, rest: false });
+  if (before.kind !== "note" || target.kind !== "note" || after.kind !== "note" || upperFrom.kind !== "note" || upperTo.kind !== "note") {
+    assert.fail("Expected note fixtures for selected event removal.");
+  }
+
+  getPrimaryVoice(part, targetMeasureId, 1).events.push(before, target, after);
+  getPrimaryVoice(part, otherMeasureId, 1).events.push(otherMeasureEvent);
+  getPrimaryVoice(part, targetMeasureId, 0).events.push(upperFrom, upperTo);
+  source.ties.push(
+    { id: "selected-incoming-tie", fromNoteId: before.notes[0].id, toNoteId: target.notes[0].id },
+    { id: "selected-outgoing-tie", fromNoteId: target.notes[0].id, toNoteId: after.notes[0].id },
+    { id: "upper-unrelated-tie", fromNoteId: upperFrom.notes[0].id, toNoteId: upperTo.notes[0].id },
+  );
+  const snapshot = structuredClone(source);
+
+  const result = removeEvent(source, part.id, lowerStaff.id, targetMeasureId, target.id);
+  assert.equal(result.error, undefined);
+  assert.equal(result.removed, true);
+  assert.equal(result.measureId, targetMeasureId);
+  assert.equal(result.eventId, target.id);
+  assert.equal(result.removedEvent.id, target.id);
+  assert.deepEqual(result.removedTieIds, ["selected-incoming-tie", "selected-outgoing-tie"]);
+  assert.notEqual(result.score, source);
+  assert.deepEqual(source, snapshot, "selected deletion must preserve the source as an undo snapshot");
+  assert.deepEqual(
+    getPrimaryVoice(result.score.parts[0], targetMeasureId, 1).events.map((event) => event.id),
+    [before.id, after.id],
+    "the surrounding events remain in order",
+  );
+  assert.deepEqual(
+    getPrimaryVoice(result.score.parts[0], otherMeasureId, 1),
+    getPrimaryVoice(source.parts[0], otherMeasureId, 1),
+    "another measure on the selected staff is preserved",
+  );
+  assert.deepEqual(
+    getPrimaryVoice(result.score.parts[0], targetMeasureId, 0),
+    getPrimaryVoice(source.parts[0], targetMeasureId, 0),
+    "the other staff in the selected measure is preserved",
+  );
+  assert.deepEqual(result.score.ties.map((tie) => tie.id), ["upper-unrelated-tie"]);
+  assert.deepEqual(validateScore(result.score), []);
+  assert.equal(upperStaff.id, result.score.parts[0].staves[0].id);
+});
+
+test("selected event removal returns concrete identity-preserving errors for invalid selectors", () => {
+  const source = createScore("solo", { seedDemo: false });
+  const part = source.parts[0];
+  const staff = part.staves[1];
+  const measureId = source.measureOrder[0];
+  const event = makeEvent({ id: "existing-selected-event", pitch: { step: "D", alter: 0, octave: 3 }, duration: { base: 4, dots: 0 }, rest: false });
+  getPrimaryVoice(part, measureId, 1).events.push(event);
+
+  const failures = [
+    { result: removeEvent(source, "missing-part", staff.id, measureId, event.id), error: /instrument part "missing-part" does not exist/i },
+    { result: removeEvent(source, part.id, "missing-staff", measureId, event.id), error: /staff selector "missing-staff".*part/i },
+    { result: removeEvent(source, part.id, staff.id, "missing-measure", event.id), error: /measure "missing-measure" does not exist/i },
+    { result: removeEvent(source, part.id, staff.id, measureId, "missing-event"), error: /event "missing-event".*measure.*staff/i },
+  ];
+
+  failures.forEach(({ result, error }) => {
+    assert.equal(result.removed, false);
+    assert.equal(result.score, source, "a failed selected deletion must preserve score identity");
+    assert.equal(result.removedEvent, null);
+    assert.deepEqual(result.removedTieIds, []);
+    assert.match(result.error, error);
+  });
+  assert.deepEqual(getPrimaryVoice(source.parts[0], measureId, 1).events.map((candidate) => candidate.id), [event.id]);
+});
+
+test("clearing a selected chord to a rest preserves its timeline slot and removes only its connected ties", () => {
+  const source = createScore("solo", { seedDemo: false });
+  const part = source.parts[0];
+  const upperStaff = part.staves[0];
+  const lowerStaff = part.staves[1];
+  const [targetMeasureId, otherMeasureId] = source.measureOrder;
+  const before = makeEvent({ id: "clear-before", pitch: { step: "C", alter: 0, octave: 3 }, duration: { base: 4, dots: 0 }, rest: false });
+  const target = makeEvent({ id: "clear-target-chord", pitch: { step: "C", alter: 0, octave: 3 }, duration: { base: 8, dots: 1 }, rest: false });
+  const after = makeEvent({ id: "clear-after", pitch: { step: "E", alter: 0, octave: 3 }, duration: { base: 4, dots: 0 }, rest: false });
+  const otherMeasureEvent = makeEvent({ id: "clear-other-measure", pitch: { step: "F", alter: 0, octave: 3 }, duration: { base: 2, dots: 0 }, rest: false });
+  const upperFrom = makeEvent({ id: "clear-upper-from", pitch: { step: "G", alter: 0, octave: 4 }, duration: { base: 4, dots: 0 }, rest: false });
+  const upperTo = makeEvent({ id: "clear-upper-to", pitch: { step: "G", alter: 0, octave: 4 }, duration: { base: 4, dots: 0 }, rest: false });
+  if (before.kind !== "note" || target.kind !== "note" || after.kind !== "note" || upperFrom.kind !== "note" || upperTo.kind !== "note") {
+    assert.fail("Expected note fixtures for exact clear-to-rest.");
+  }
+  target.notes.push({
+    id: "clear-target-chord-note-2",
+    pitch: { step: "E", alter: 0, octave: 3 },
+    accidentalDisplay: "auto",
+  });
+  target.dynamic = "ff";
+  target.articulation = "marcato";
+  const targetVoice = getPrimaryVoice(part, targetMeasureId, 1);
+  targetVoice.events.push(before, target, after);
+  getPrimaryVoice(part, otherMeasureId, 1).events.push(otherMeasureEvent);
+  getPrimaryVoice(part, targetMeasureId, 0).events.push(upperFrom, upperTo);
+  source.ties.push(
+    { id: "clear-selected-incoming", fromNoteId: before.notes[0].id, toNoteId: target.notes[0].id },
+    { id: "clear-selected-outgoing", fromNoteId: target.notes[1].id, toNoteId: after.notes[0].id },
+    { id: "clear-upper-unrelated", fromNoteId: upperFrom.notes[0].id, toNoteId: upperTo.notes[0].id },
+  );
+  assert.deepEqual(validateScore(source), []);
+  const snapshot = structuredClone(source);
+  const ticksBefore = voiceTicks(targetVoice);
+  const targetOnsetBefore = targetVoice.events.slice(0, 1).reduce((sum, event) => sum + durationTicks(event.duration), 0);
+  const afterOnsetBefore = targetVoice.events.slice(0, 2).reduce((sum, event) => sum + durationTicks(event.duration), 0);
+
+  const result = clearEventToRest(source, part.id, lowerStaff.id, targetMeasureId, target.id);
+  assert.equal(result.error, undefined);
+  assert.equal(result.changed, true);
+  assert.equal(result.measureId, targetMeasureId);
+  assert.equal(result.eventId, target.id);
+  assert.deepEqual(result.removedTieIds, ["clear-selected-incoming", "clear-selected-outgoing"]);
+  assert.notEqual(result.score, source);
+  assert.notEqual(result.score.updatedAt, source.updatedAt, "a successful clear stamps its cloned score");
+  assert.deepEqual(source, snapshot, "clear-to-rest must preserve the source as an undo snapshot");
+
+  const nextVoice = getPrimaryVoice(result.score.parts[0], targetMeasureId, 1);
+  assert.deepEqual(nextVoice.events.map((event) => event.id), [before.id, target.id, after.id]);
+  const rest = nextVoice.events[1];
+  assert.equal(rest.kind, "rest");
+  assert.deepEqual(rest.duration, target.duration, "the replacement rest keeps the chord's full rhythmic value");
+  assert.equal(rest.dynamic, "ff", "an event-level dynamic survives note-to-rest conversion");
+  assert.equal(Object.hasOwn(rest, "notes"), false);
+  assert.equal(Object.hasOwn(rest, "articulation"), false);
+  assert.equal(voiceTicks(nextVoice), ticksBefore);
+  assert.equal(nextVoice.events.slice(0, 1).reduce((sum, event) => sum + durationTicks(event.duration), 0), targetOnsetBefore);
+  assert.equal(
+    nextVoice.events.slice(0, 2).reduce((sum, event) => sum + durationTicks(event.duration), 0),
+    afterOnsetBefore,
+    "the following note keeps its onset instead of closing the deleted time gap",
+  );
+  assert.deepEqual(
+    getPrimaryVoice(result.score.parts[0], otherMeasureId, 1),
+    getPrimaryVoice(source.parts[0], otherMeasureId, 1),
+    "another measure on the selected staff is unchanged",
+  );
+  assert.deepEqual(
+    getPrimaryVoice(result.score.parts[0], targetMeasureId, 0),
+    getPrimaryVoice(source.parts[0], targetMeasureId, 0),
+    "the other staff in the selected measure is unchanged",
+  );
+  assert.deepEqual(result.score.ties.map((tie) => tie.id), ["clear-upper-unrelated"]);
+  assert.equal(upperStaff.id, result.score.parts[0].staves[0].id);
+  assert.deepEqual(validateScore(result.score), []);
+});
+
+test("clear-to-rest rejects rests, invalid selectors, missing cells, and ambiguous events without changing identity", () => {
+  const source = createScore("solo", { seedDemo: false });
+  const part = source.parts[0];
+  const staff = part.staves[1];
+  const measureId = source.measureOrder[0];
+  const note = makeEvent({ id: "clear-existing-note", pitch: { step: "D", alter: 0, octave: 3 }, duration: { base: 4, dots: 0 }, rest: false });
+  const rest = makeEvent({ id: "clear-existing-rest", pitch: { step: "D", alter: 0, octave: 3 }, duration: { base: 4, dots: 0 }, rest: true });
+  getPrimaryVoice(part, measureId, 1).events.push(note, rest);
+
+  const failures = [
+    { result: clearEventToRest(source, "missing-part", staff.id, measureId, note.id), error: /instrument part "missing-part" does not exist/i },
+    { result: clearEventToRest(source, part.id, "missing-staff", measureId, note.id), error: /staff selector "missing-staff".*part/i },
+    { result: clearEventToRest(source, part.id, staff.id, "missing-measure", note.id), error: /measure "missing-measure" does not exist/i },
+    { result: clearEventToRest(source, part.id, staff.id, measureId, "missing-event"), error: /event "missing-event".*measure.*staff/i },
+    { result: clearEventToRest(source, part.id, staff.id, measureId, rest.id), error: /already a rest/i },
+  ];
+  for (const { result, error } of failures) {
+    assert.equal(result.changed, false);
+    assert.equal(result.score, source, "every failed clear-to-rest request preserves score identity");
+    assert.deepEqual(result.removedTieIds, []);
+    assert.match(result.error, error);
+  }
+
+  const missingStaffMeasure = structuredClone(source);
+  delete missingStaffMeasure.parts[0].staves[1].measures[measureId];
+  const missingCell = clearEventToRest(missingStaffMeasure, part.id, staff.id, measureId, note.id);
+  assert.equal(missingCell.changed, false);
+  assert.equal(missingCell.score, missingStaffMeasure);
+  assert.deepEqual(missingCell.removedTieIds, []);
+  assert.match(missingCell.error, /staff.*is missing measure/i);
+
+  const ambiguous = structuredClone(source);
+  ambiguous.parts[0].staves[1].measures[measureId].voices.push({
+    id: "clear-duplicate-voice",
+    events: [structuredClone(note)],
+  });
+  const duplicate = clearEventToRest(ambiguous, part.id, staff.id, measureId, note.id);
+  assert.equal(duplicate.changed, false);
+  assert.equal(duplicate.score, ambiguous);
+  assert.deepEqual(duplicate.removedTieIds, []);
+  assert.match(duplicate.error, /event id.*ambiguous/i);
+  assert.deepEqual(getPrimaryVoice(source.parts[0], measureId, 1).events, [note, rest]);
+});
+
 test("chord-tone entry preserves rhythm, written pitches, immutable undo snapshots, playback, and MusicXML", () => {
   const source = createScore("solo", { seedDemo: false });
   const part = source.parts[0];
@@ -826,6 +1091,60 @@ test("chord-tone entry preserves rhythm, written pitches, immutable undo snapsho
   assert.equal(restError.measureId, restMeasureId);
   assert.equal(restError.eventId, "last-rest");
   assert.match(restError.error, /last event is a rest/i);
+});
+
+test("exact chord-tone edits stay attached to a selected seed even when a later measure ends in a rest", () => {
+  const source = createScore("solo", { seedDemo: false });
+  const part = source.parts[0];
+  const staffId = part.staves[0].id;
+  const [seedMeasureId, laterMeasureId] = source.measureOrder;
+  const seed = makeEvent({
+    id: "first-fit-chord-seed",
+    pitch: { step: "C", alter: 0, octave: 4 },
+    duration: { base: 4, dots: 0 },
+    rest: false,
+  });
+  const laterRest = makeEvent({
+    id: "later-trailing-rest",
+    pitch: { step: "C", alter: 0, octave: 4 },
+    duration: { base: 4, dots: 0 },
+    rest: true,
+  });
+  getPrimaryVoice(part, seedMeasureId).events.push(seed);
+  getPrimaryVoice(part, laterMeasureId).events.push(laterRest);
+  const snapshot = structuredClone(source);
+  const tone: ScoreNote = {
+    id: "exact-selected-tone",
+    pitch: { step: "E", alter: 0, octave: 4 },
+    accidentalDisplay: "auto",
+  };
+
+  const added = addChordToneToEvent(source, part.id, staffId, seedMeasureId, seed.id, tone);
+  assert.equal(added.added, true);
+  assert.equal(added.measureId, seedMeasureId);
+  assert.equal(added.eventId, seed.id);
+  assert.deepEqual(source, snapshot, "exact chord entry must preserve its undo snapshot");
+  const seededChord = getPrimaryVoice(added.score.parts[0], seedMeasureId).events[0];
+  if (seededChord.kind !== "note") assert.fail("Expected the selected seed to remain a note event.");
+  assert.deepEqual(seededChord.notes.map((note) => note.pitch.step), ["C", "E"]);
+  assert.equal(getPrimaryVoice(added.score.parts[0], laterMeasureId).events[0].id, laterRest.id);
+
+  const removed = removeChordToneFromEvent(added.score, part.id, staffId, seedMeasureId, seed.id);
+  assert.equal(removed.removed, true);
+  assert.equal(removed.removedNote.id, tone.id);
+  assert.equal(removed.remainingNoteCount, 1);
+  const restoredSeed = getPrimaryVoice(removed.score.parts[0], seedMeasureId).events[0];
+  if (restoredSeed.kind !== "note") assert.fail("Expected chord-tone deletion to preserve the note event.");
+  assert.equal(restoredSeed.notes.length, 1);
+
+  const rejectedRest = addChordToneToEvent(source, part.id, staffId, laterMeasureId, laterRest.id, tone);
+  assert.equal(rejectedRest.added, false);
+  assert.equal(rejectedRest.score, source);
+  assert.match(rejectedRest.error, /rest.*cannot receive a chord tone/i);
+  const rejectedMissing = removeChordToneFromEvent(source, part.id, staffId, seedMeasureId, "missing-event");
+  assert.equal(rejectedMissing.removed, false);
+  assert.equal(rejectedMissing.score, source);
+  assert.match(rejectedMissing.error, /does not exist/i);
 });
 
 test("last chord-tone removal is immutable, rhythm-safe, staff-targeted, and cleans only connected ties", () => {
@@ -1303,6 +1622,175 @@ test("articulations attach immutably to the latest selected-staff note while ski
   assert.match(invalid.error ?? "", /staccato.*tenuto.*accent.*marcato/i);
 });
 
+test("selected-event dynamics update exactly one note or rest with immutable, identity-preserving outcomes", () => {
+  const source = createScore("solo", { seedDemo: false });
+  const part = source.parts[0];
+  const upperStaff = part.staves[0];
+  const lowerStaff = part.staves[1];
+  const [otherMeasureId, targetMeasureId] = source.measureOrder;
+  const before = makeEvent({ id: "dynamic-before", pitch: { step: "C", alter: 0, octave: 3 }, duration: { base: 8, dots: 0 }, rest: false });
+  const target = makeEvent({ id: "dynamic-target-rest", pitch: { step: "D", alter: 0, octave: 3 }, duration: { base: 4, dots: 0 }, rest: true });
+  const after = makeEvent({ id: "dynamic-after", pitch: { step: "E", alter: 0, octave: 3 }, duration: { base: 8, dots: 0 }, rest: false });
+  const otherStaffEvent = makeEvent({ id: "dynamic-other-staff", pitch: { step: "F", alter: 0, octave: 4 }, duration: { base: 4, dots: 0 }, rest: false });
+  const otherMeasureEvent = makeEvent({ id: "dynamic-other-measure", pitch: { step: "G", alter: 0, octave: 3 }, duration: { base: 4, dots: 0 }, rest: false });
+  getPrimaryVoice(part, targetMeasureId, 1).events.push(before, target, after);
+  getPrimaryVoice(part, targetMeasureId, 0).events.push(otherStaffEvent);
+  getPrimaryVoice(part, otherMeasureId, 1).events.push(otherMeasureEvent);
+  const snapshot = structuredClone(source);
+  const ticksBefore = voiceTicks(getPrimaryVoice(part, targetMeasureId, 1));
+
+  const attached = setEventDynamic(source, part.id, lowerStaff.id, targetMeasureId, target.id, "ff");
+  assert.equal(attached.error, undefined);
+  assert.equal(attached.changed, true);
+  assert.equal(attached.measureId, targetMeasureId);
+  assert.equal(attached.eventId, target.id);
+  assert.equal(attached.previousDynamic, null);
+  assert.equal(attached.dynamic, "ff");
+  assert.notEqual(attached.score, source);
+  assert.notEqual(attached.score.updatedAt, source.updatedAt, "a successful edit stamps the cloned score");
+  assert.deepEqual(source, snapshot, "a successful exact edit preserves the source as an undo snapshot");
+  const attachedEvents = getPrimaryVoice(attached.score.parts[0], targetMeasureId, 1).events;
+  assert.equal(attachedEvents[0].dynamic, undefined);
+  assert.equal(attachedEvents[1].id, target.id);
+  assert.equal(attachedEvents[1].dynamic, "ff", "a middle rest accepts an event-level dynamic");
+  assert.equal(attachedEvents[2].dynamic, undefined);
+  assert.equal(getPrimaryVoice(attached.score.parts[0], targetMeasureId, 0).events[0].dynamic, undefined);
+  assert.equal(getPrimaryVoice(attached.score.parts[0], otherMeasureId, 1).events[0].dynamic, undefined);
+  assert.equal(voiceTicks(getPrimaryVoice(attached.score.parts[0], targetMeasureId, 1)), ticksBefore);
+
+  const unchanged = setEventDynamic(attached.score, part.id, 1, targetMeasureId, target.id, "ff");
+  assert.equal(unchanged.error, undefined);
+  assert.equal(unchanged.changed, false);
+  assert.equal(unchanged.previousDynamic, "ff");
+  assert.equal(unchanged.score, attached.score, "an exact semantic no-op does not create undo history or restamp");
+
+  const cleared = setEventDynamic(attached.score, part.id, lowerStaff.id, targetMeasureId, target.id, null);
+  assert.equal(cleared.error, undefined);
+  assert.equal(cleared.changed, true);
+  assert.equal(cleared.previousDynamic, "ff");
+  assert.equal(Object.hasOwn(getPrimaryVoice(cleared.score.parts[0], targetMeasureId, 1).events[1], "dynamic"), false);
+  assert.deepEqual(validateScore(JSON.parse(JSON.stringify(cleared.score))), []);
+
+  const failures = [
+    { result: setEventDynamic(source, "missing-part", lowerStaff.id, targetMeasureId, target.id, "p"), error: /instrument part "missing-part" does not exist/i },
+    { result: setEventDynamic(source, part.id, "missing-staff", targetMeasureId, target.id, "p"), error: /staff selector "missing-staff".*part/i },
+    { result: setEventDynamic(source, part.id, lowerStaff.id, "missing-measure", target.id, "p"), error: /measure "missing-measure" does not exist/i },
+    { result: setEventDynamic(source, part.id, lowerStaff.id, targetMeasureId, "missing-event", "p"), error: /event "missing-event" does not exist.*staff/i },
+    { result: setEventDynamic(source, part.id, lowerStaff.id, targetMeasureId, target.id, "forte" as never), error: /ppp.*fff.*none/i },
+  ];
+  for (const { result, error } of failures) {
+    assert.equal(result.changed, false);
+    assert.equal(result.score, source, "every validation failure preserves score identity");
+    assert.match(result.error ?? "", error);
+  }
+
+  const missingStaffMeasure = structuredClone(source);
+  delete missingStaffMeasure.parts[0].staves[1].measures[targetMeasureId];
+  const missingCell = setEventDynamic(missingStaffMeasure, part.id, lowerStaff.id, targetMeasureId, target.id, "p");
+  assert.equal(missingCell.changed, false);
+  assert.equal(missingCell.score, missingStaffMeasure);
+  assert.match(missingCell.error ?? "", /staff.*is missing measure/i);
+
+  const ambiguous = structuredClone(source);
+  ambiguous.parts[0].staves[1].measures[targetMeasureId].voices.push({
+    id: "dynamic-duplicate-voice",
+    events: [structuredClone(target)],
+  });
+  const duplicate = setEventDynamic(ambiguous, part.id, lowerStaff.id, targetMeasureId, target.id, "p");
+  assert.equal(duplicate.changed, false);
+  assert.equal(duplicate.score, ambiguous);
+  assert.match(duplicate.error ?? "", /event id.*ambiguous/i);
+  assert.equal(upperStaff.id, source.parts[0].staves[0].id);
+});
+
+test("selected-event articulations update only the exact note and reject rests or ambiguous targets", () => {
+  const source = createScore("solo", { seedDemo: false });
+  const part = source.parts[0];
+  const upperStaff = part.staves[0];
+  const lowerStaff = part.staves[1];
+  const [otherMeasureId, targetMeasureId] = source.measureOrder;
+  const before = makeEvent({ id: "articulation-before", pitch: { step: "C", alter: 0, octave: 3 }, duration: { base: 8, dots: 0 }, rest: false });
+  const target = makeEvent({ id: "articulation-target", pitch: { step: "D", alter: 0, octave: 3 }, duration: { base: 4, dots: 1 }, rest: false });
+  const rest = makeEvent({ id: "articulation-rest", pitch: { step: "E", alter: 0, octave: 3 }, duration: { base: 8, dots: 0 }, rest: true });
+  const otherStaffEvent = makeEvent({ id: "articulation-other-staff", pitch: { step: "F", alter: 0, octave: 4 }, duration: { base: 4, dots: 0 }, rest: false });
+  const otherMeasureEvent = makeEvent({ id: "articulation-other-measure", pitch: { step: "G", alter: 0, octave: 3 }, duration: { base: 4, dots: 0 }, rest: false });
+  getPrimaryVoice(part, targetMeasureId, 1).events.push(before, target, rest);
+  getPrimaryVoice(part, targetMeasureId, 0).events.push(otherStaffEvent);
+  getPrimaryVoice(part, otherMeasureId, 1).events.push(otherMeasureEvent);
+  const snapshot = structuredClone(source);
+  const ticksBefore = voiceTicks(getPrimaryVoice(part, targetMeasureId, 1));
+
+  const attached = setEventArticulation(source, part.id, lowerStaff.id, targetMeasureId, target.id, "accent");
+  assert.equal(attached.error, undefined);
+  assert.equal(attached.changed, true);
+  assert.equal(attached.measureId, targetMeasureId);
+  assert.equal(attached.eventId, target.id);
+  assert.equal(attached.previousArticulation, null);
+  assert.equal(attached.articulation, "accent");
+  assert.notEqual(attached.score, source);
+  assert.notEqual(attached.score.updatedAt, source.updatedAt, "a successful edit stamps the cloned score");
+  assert.deepEqual(source, snapshot, "articulation editing leaves the source untouched");
+  const attachedEvents = getPrimaryVoice(attached.score.parts[0], targetMeasureId, 1).events;
+  assert.equal(attachedEvents[0].kind, "note");
+  if (attachedEvents[0].kind !== "note" || attachedEvents[1].kind !== "note") assert.fail("Expected note fixtures.");
+  assert.equal(attachedEvents[0].articulation, undefined);
+  assert.equal(attachedEvents[1].articulation, "accent", "only the selected middle note changes");
+  assert.equal(getPrimaryVoice(attached.score.parts[0], targetMeasureId, 0).events[0].kind, "note");
+  const attachedOtherStaffEvent = getPrimaryVoice(attached.score.parts[0], targetMeasureId, 0).events[0];
+  const attachedOtherMeasureEvent = getPrimaryVoice(attached.score.parts[0], otherMeasureId, 1).events[0];
+  if (attachedOtherStaffEvent.kind !== "note" || attachedOtherMeasureEvent.kind !== "note") assert.fail("Expected note fixtures.");
+  assert.equal(attachedOtherStaffEvent.articulation, undefined);
+  assert.equal(attachedOtherMeasureEvent.articulation, undefined);
+  assert.equal(voiceTicks(getPrimaryVoice(attached.score.parts[0], targetMeasureId, 1)), ticksBefore);
+
+  const unchanged = setEventArticulation(attached.score, part.id, 1, targetMeasureId, target.id, "accent");
+  assert.equal(unchanged.error, undefined);
+  assert.equal(unchanged.changed, false);
+  assert.equal(unchanged.previousArticulation, "accent");
+  assert.equal(unchanged.score, attached.score, "an exact articulation no-op preserves identity");
+
+  const replaced = setEventArticulation(attached.score, part.id, lowerStaff.id, targetMeasureId, target.id, "marcato");
+  assert.equal(replaced.error, undefined);
+  assert.equal(replaced.changed, true);
+  assert.equal(replaced.previousArticulation, "accent");
+  const replacedEvent = getPrimaryVoice(replaced.score.parts[0], targetMeasureId, 1).events[1];
+  if (replacedEvent.kind !== "note") assert.fail("Expected the selected note.");
+  assert.equal(replacedEvent.articulation, "marcato");
+
+  const cleared = setEventArticulation(replaced.score, part.id, lowerStaff.id, targetMeasureId, target.id, null);
+  assert.equal(cleared.error, undefined);
+  assert.equal(cleared.changed, true);
+  assert.equal(cleared.previousArticulation, "marcato");
+  const clearedEvent = getPrimaryVoice(cleared.score.parts[0], targetMeasureId, 1).events[1];
+  assert.equal(Object.hasOwn(clearedEvent, "articulation"), false);
+  assert.deepEqual(validateScore(JSON.parse(JSON.stringify(cleared.score))), []);
+
+  const failures = [
+    { result: setEventArticulation(source, "missing-part", lowerStaff.id, targetMeasureId, target.id, "tenuto"), error: /instrument part "missing-part" does not exist/i },
+    { result: setEventArticulation(source, part.id, "missing-staff", targetMeasureId, target.id, "tenuto"), error: /staff selector "missing-staff".*part/i },
+    { result: setEventArticulation(source, part.id, lowerStaff.id, "missing-measure", target.id, "tenuto"), error: /measure "missing-measure" does not exist/i },
+    { result: setEventArticulation(source, part.id, lowerStaff.id, targetMeasureId, "missing-event", "tenuto"), error: /event "missing-event" does not exist.*staff/i },
+    { result: setEventArticulation(source, part.id, lowerStaff.id, targetMeasureId, rest.id, "tenuto"), error: /rest.*cannot have an articulation/i },
+    { result: setEventArticulation(source, part.id, lowerStaff.id, targetMeasureId, target.id, "fermata" as never), error: /staccato.*tenuto.*accent.*marcato.*none/i },
+  ];
+  for (const { result, error } of failures) {
+    assert.equal(result.changed, false);
+    assert.equal(result.score, source, "every invalid articulation request preserves score identity");
+    assert.match(result.error ?? "", error);
+  }
+
+  const ambiguous = structuredClone(source);
+  ambiguous.parts[0].staves[1].measures[targetMeasureId].voices.push({
+    id: "articulation-duplicate-voice",
+    events: [structuredClone(target)],
+  });
+  const duplicate = setEventArticulation(ambiguous, part.id, lowerStaff.id, targetMeasureId, target.id, "tenuto");
+  assert.equal(duplicate.changed, false);
+  assert.equal(duplicate.score, ambiguous);
+  assert.match(duplicate.error ?? "", /event id.*ambiguous/i);
+  assert.equal(upperStaff.id, source.parts[0].staves[0].id);
+});
+
 test("articulation performance, MIDI, and MusicXML share bounded semantics", () => {
   assert.equal(STACCATO_GATE_RATIO, 0.5);
   assert.deepEqual(ARTICULATION_VELOCITY_BONUSES, { staccato: 0, tenuto: 0, accent: 14, marcato: 24 });
@@ -1325,6 +1813,7 @@ test("articulation performance, MIDI, and MusicXML share bounded semantics", () 
   const playback = new Map(collectPlaybackNotes(score).map((item) => [item.midi, item]));
   const normalPlayback = playback.get(60)!;
   assert.equal(playback.get(62)!.durationSeconds, normalPlayback.durationSeconds * STACCATO_GATE_RATIO);
+  assert.equal(playback.get(62)!.notatedDurationSeconds, normalPlayback.notatedDurationSeconds, "staccato changes the sound gate, not the engraved cursor span");
   assert.equal(playback.get(64)!.durationSeconds, normalPlayback.durationSeconds, "tenuto retains the normal Garak gate");
   assert.equal(playback.get(65)!.velocity, DEFAULT_MIDI_VELOCITY + ARTICULATION_VELOCITY_BONUSES.accent);
   assert.equal(playback.get(67)!.velocity, 127, "marcato velocity is clamped to MIDI's maximum");
@@ -1412,7 +1901,9 @@ test("tie-chain playback and MIDI intentionally use only the root articulation a
   const lastPlayback = collectPlaybackNotes(lastStaccato.score);
   assert.equal(normalPlayback.length, 1, "three tied notes become one performed attack");
   assert.equal(normalPlayback[0].durationSeconds, 2.7);
+  assert.equal(normalPlayback[0].notatedDurationSeconds, 3, "a tied chain keeps its complete notated transport span");
   assert.equal(rootPlayback[0].durationSeconds, 1.35, "root staccato halves the merged chain before the common 90% live gate");
+  assert.equal(rootPlayback[0].notatedDurationSeconds, normalPlayback[0].notatedDurationSeconds, "root staccato cannot shorten the playhead timeline");
   assert.equal(middlePlayback[0].durationSeconds, normalPlayback[0].durationSeconds, "middle-destination staccato is visual/XML metadata only");
   assert.equal(lastPlayback[0].durationSeconds, normalPlayback[0].durationSeconds, "terminal-destination staccato is visual/XML metadata only");
 
@@ -1665,6 +2156,7 @@ test("bounded live playback is chronological and fair across simultaneous parts"
     velocity: DEFAULT_MIDI_VELOCITY,
     startSeconds: onset,
     durationSeconds: .5,
+    notatedDurationSeconds: .5,
   })));
   const selection = selectPlaybackWindow(input, 600);
   assert.equal(selection.total, 700);
