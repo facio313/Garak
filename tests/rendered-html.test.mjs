@@ -46,9 +46,9 @@ test("server-renders the Garak notation studio", async () => {
   assert.equal((html.match(/data-key-signature-option/g) ?? []).length, 30);
   assert.match(html, /Automatic accidental from the selected part key signature/);
   assert.match(html, /Force sharp accidental/);
-  assert.match(html, /Chord mode\. Add A through G to the last note event/);
+  assert.match(html, /Chord mode\. Add A through G to the latest note event/);
   assert.match(html, /aria-pressed="false"[^>]*>Chord<\/button>/);
-  assert.match(html, /aria-label="Remove last chord tone"[^>]*disabled/);
+  assert.match(html, /aria-label="Delete previous [^"]+"[^>]*>[^<]*<svg[\s\S]*?Delete previous input<\/button>/);
   assert.match(html, /aria-label="Dynamic on last event"/);
   assert.match(html, /aria-label="Articulation on last note event"/);
   assert.match(html, /id="score-title"[^>]*maxLength="200"/);
@@ -83,6 +83,71 @@ test("server-renders the Garak notation studio", async () => {
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Your site is taking shape/);
 });
 
+test("ships a complete, locally readable, version-matched license inventory", async () => {
+  const response = await render("/licenses");
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
+  const html = await response.text();
+  assert.match(html, /<title>Open-source licenses — Garak Studio<\/title>/i);
+  assert.match(html, />Open-source licenses</);
+  assert.match(html, />19(?:<!-- -->)? shipped components and font payloads</);
+  assert.match(html, /href="\/licenses\/manifest\.json"/);
+  assert.match(html, /href="\/licenses\/react-19\.2\.8-LICENSE\.txt"/);
+  assert.match(html, /Academico Regular/);
+  assert.match(html, /Academico Bold/);
+  assert.match(html, /Bravura/);
+
+  const [manifestText, packageLockText, studio, styles] = await Promise.all([
+    readFile(new URL("../public/licenses/manifest.json", import.meta.url), "utf8"),
+    readFile(new URL("../package-lock.json", import.meta.url), "utf8"),
+    readFile(new URL("../components/NotationStudio.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+  const manifest = JSON.parse(manifestText);
+  const packageLock = JSON.parse(packageLockText);
+  assert.equal(manifest.entries.length, 19);
+  assert.ok(studio.includes('href="/licenses"'), "licenses must be discoverable from the editor UI");
+  assert.ok(studio.includes("About & licenses"));
+  assert.ok(studio.includes("Third-party licenses"));
+  assert.match(styles, /\.export-menu button, \.export-menu>a\s*\{[^}]*min-height:\s*44px/, "the license disclosure must retain the same touch target as export actions");
+
+  const packageEntries = manifest.entries.filter((entry) => !entry.provenancePath);
+  for (const entry of packageEntries) {
+    assert.equal(packageLock.packages[`node_modules/${entry.name}`]?.version, entry.version, `${entry.name} notice version must match the lockfile`);
+  }
+  for (const entry of manifest.entries) {
+    assert.match(entry.noticePath, /^\.\/[a-z0-9][a-z0-9._-]+$/i);
+    const source = new URL(entry.source);
+    assert.equal(source.protocol, "https:");
+    assert.equal(source.username, "");
+    assert.equal(source.password, "");
+    assert.equal(source.search, "");
+    assert.equal(source.hash, "");
+    const noticeUrl = new URL(`../public/licenses/${entry.noticePath.slice(2)}`, import.meta.url);
+    const notice = await readFile(noticeUrl, "utf8");
+    assert.ok(notice.length > 500, `${entry.name} must ship its complete local notice`);
+    await access(new URL(`../dist/client/licenses/${entry.noticePath.slice(2)}`, import.meta.url));
+    if (entry.provenancePath) {
+      const provenance = await readFile(new URL(`../public/licenses/${entry.provenancePath.slice(2)}`, import.meta.url), "utf8");
+      assert.match(provenance, new RegExp(entry.sha256, "i"));
+      await access(new URL(`../dist/client/licenses/${entry.provenancePath.slice(2)}`, import.meta.url));
+    }
+  }
+
+  const academico = await readFile(new URL("../public/licenses/academico-0.902-OFL-1.1.txt", import.meta.url), "utf8");
+  assert.match(academico, /Copyright © 2022, Steinberg Media Technologies GmbH/);
+  assert.match(academico, /Reserved Font Name "Academico"/);
+  assert.match(academico, /SIL OPEN FONT LICENSE Version 1\.1/);
+  assert.match(academico, /OTHER DEALINGS IN THE FONT SOFTWARE\./);
+  const bravura = await readFile(new URL("../public/licenses/bravura-1.392-OFL-1.1.txt", import.meta.url), "utf8");
+  assert.match(bravura, /Copyright © 2019, Steinberg Media Technologies GmbH/);
+  assert.match(bravura, /Reserved Font Name "Bravura"/);
+  assert.match(bravura, /OTHER DEALINGS IN THE FONT SOFTWARE\./);
+  const lucide = await readFile(new URL("../public/licenses/lucide-react-1.33.0-LICENSE.txt", import.meta.url), "utf8");
+  assert.match(lucide, /ISC License/);
+  assert.match(lucide, /Cole Bemis/);
+});
+
 test("ships product metadata and removes the disposable starter", async () => {
   const [page, layout, packageJson, og, studio, styles, renderer, durationIcon, playbackPosition, exporters] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
@@ -112,7 +177,7 @@ test("ships product metadata and removes the disposable starter", async () => {
   assert.ok(studio.includes("removeLastChordTone(score, part.id, staffId)"));
   assert.ok(studio.includes('`Removed ${pitchName(result.removedNote.pitch)} · Chord · ${countLabel(result.remainingNoteCount, "note")} · Undo is available`'));
   assert.ok(studio.includes("const removeLatestInput = useCallback"), "keyboard and visible Delete controls must share one deletion callback");
-  assert.equal((studio.match(/onClick=\{\(\) => removeLatestInput\(\)\}/g) ?? []).length, 2, "desktop and mobile must each expose the non-collapsing shared Delete action");
+  assert.equal((studio.match(/onClick=\{\(\) => removeLatestInput\(\)\}/g) ?? []).length, 3, "toolbar, inspector, and mobile dock must expose the same non-collapsing Delete action");
   assert.ok(studio.includes('className="mobile-input-dock" aria-label="Quick notation input"'), "touch input must have a dedicated persistent dock");
   assert.ok(studio.includes('className="mobile-pitch-keys" role="group" aria-label="Enter pitch or rest"'), "the mobile dock must keep every pitch and Rest together");
   assert.ok(studio.includes('className="mobile-rest-meta"'), "the narrowest layout must be able to move Rest aside and enlarge all seven pitch targets");
@@ -148,10 +213,19 @@ test("ships product metadata and removes the disposable starter", async () => {
   assert.ok(studio.includes("item.velocity / 127"), "live playback must consume semantic dynamic velocity");
   assert.ok(studio.includes("Math.min(.018, item.durationSeconds * .35)"), "live playback attack must fit short 32nd/64th note gates");
   assert.ok(studio.includes("Math.round(tempo || 96)"), "the UI must preserve the integer tempo contract used by MusicXML");
-  assert.ok(studio.includes("selectPlaybackWindow(collectPlaybackNotes(score), 600)"), "large-score playback must choose a chronological cross-part window");
+  assert.ok(studio.includes("selectPlaybackWindow(collectPlaybackNotes(score, playbackPartIds), 600)"), "large-score playback must choose a bounded chronological window in the visible score or part scope");
+  assert.ok(studio.includes('viewMode === "part" && selectedPart ? [selectedPart.id] : undefined'), "part-view playback must not traverse hidden full-score parts");
+  assert.ok(studio.includes("const wholeScoreEngravingPlan = useMemo"), "large-score edit safety must be based on the whole document even while a small part is visible");
+  assert.ok(studio.includes('planLiveEngraving(score, "score", selectedPartId)'), "part fallback must never make an oversized whole document silently editable");
+  assert.ok(studio.includes("if (guardLargeScoreEditing()) return;"), "mutation paths must stop before cloning an oversized document");
+  assert.ok(studio.includes("Large score · editing paused for responsiveness · save and export remain available"), "read-only large-score behavior must be explicit and preserve escape hatches");
+  assert.ok(studio.includes("MAX_MUSICXML_FILE_BYTES, MAX_NATIVE_FILE_BYTES, serializeNativeScore"), "native JSON and MusicXML must have explicit format-specific file boundaries");
+  assert.ok(studio.includes("downloadBlob(serializeNativeScore(score)"), "native snapshots must be compact and remain inside their re-importable canonical budget");
+  assert.ok(studio.includes("serializeNativeScore(next)"), "edits must be rejected atomically before they can leave the portable native-snapshot domain");
   assert.ok(studio.includes('Playing the first ${notes.length} of ${countLabel(playbackWindow.total, "note")}'), "playback truncation must be explicit and grammatical");
   assert.ok(studio.includes('Playing ${countLabel(notes.length, "note")}'), "single-note playback status must use the singular noun");
-  assert.ok(studio.includes("context.currentTime - start"), "the visual cursor must share Web Audio's scheduled clock and pre-roll");
+  assert.match(studio, /context!?\.currentTime - start/, "the visual cursor must share Web Audio's scheduled clock and pre-roll");
+  assert.match(studio, /try \{[\s\S]*?context = new AudioContext\(\);[\s\S]*?context\.createGain\(\);[\s\S]*?context!\.createOscillator\(\);[\s\S]*?\} catch \{[\s\S]*?context\.close\(\)/, "audio graph construction failures must close the partial context and restore idle playback state");
   assert.doesNotMatch(studio, /performance\.now\(\)/, "playback must not mix the document clock with the AudioContext clock");
   assert.ok(studio.includes("scoreNotatedDurationSeconds(score)"), "playback must keep the cursor through the complete score timeline, including engraved trailing measures");
   assert.ok(studio.includes("note.startSeconds + note.notatedDurationSeconds"), "a truncated or articulated playback window must end on its rhythmic span rather than its shortened oscillator gate");
@@ -179,6 +253,12 @@ test("ships product metadata and removes the disposable starter", async () => {
   assert.ok(studio.includes("importMusicXML(contents)"));
   assert.ok(studio.includes('await import("../lib/music/importers")'), "the MusicXML parser must load only when an XML file is selected");
   assert.doesNotMatch(studio, /^import \{ importMusicXML \} from/m, "the initial studio chunk must not statically include the MusicXML parser");
+  assert.ok(studio.includes("const importRequestIdRef = useRef(0)"), "file imports must have a last-request-wins identity");
+  assert.ok((studio.match(/requestId !== importRequestIdRef\.current/g) ?? []).length >= 3, "every asynchronous import boundary and error path must reject stale requests");
+  assert.ok(studio.includes("const previousScore = scoreRef.current"), "import Undo must capture the score that exists when replacement actually happens");
+  assert.ok(studio.includes("revalidateEventSelection(previousScore, selectedEventTargetRef.current)"), "import Undo must pair the latest valid event selection with that score");
+  assert.ok(studio.includes("setPast((items) => preserveUndo"), "import completion must update the latest history instead of overwriting edits from a stale closure");
+  assert.ok(studio.includes('trimStudioHistory([...items, { score: previousScore, selection: previousSelection }], "end")'), "safe previous scores must enter bounded import Undo history");
   assert.ok(studio.includes("Cancel MusicXML import"));
   assert.ok(studio.includes("siblings.forEach((element) => { element.inert = true; })"), "modal background controls must become inert");
   assert.ok(studio.includes('document.addEventListener("keydown", handleDialogKey)'), "dialogs must trap Tab and handle Escape");
@@ -210,8 +290,11 @@ test("ships product metadata and removes the disposable starter", async () => {
   assert.ok(studio.includes('aria-label="File and export menu"'));
   assert.ok(studio.includes('role="group" aria-label="File and export options"'));
   assert.doesNotMatch(studio, /aria-haspopup="true"/, "the export disclosure must not claim menu keyboard semantics while exposing ordinary buttons");
-  assert.ok(studio.includes('tabIndex={-1} aria-hidden="true"'), "the programmatic file input must not create a duplicate tab stop");
-  assert.equal((studio.match(/aria-live="polite"/g) ?? []).length, 1, "status updates must have one live region");
+  assert.ok(studio.includes("ref={fileInputRef} hidden type=\"file\""), "the programmatic file input must be absent from layout and the accessibility tree");
+  assert.equal((studio.match(/aria-live="polite"/g) ?? []).length, 1, "filtered instrument results must keep one scoped polite live region");
+  assert.ok(studio.includes('className="catalog-results" role="status" aria-live="polite"'), "instrument search must announce its result count in context");
+  assert.ok(studio.includes('className="sr-status" role={statusTone(status) === "error" ? "alert" : "status"}'), "editing feedback must retain one severity-aware global live region");
+  assert.ok(studio.includes('aria-live={statusTone(status) === "error" ? "assertive" : "polite"}'), "data-loss and import failures must interrupt polite editing feedback");
   assert.ok(studio.includes("revision: current.revision + 1"), "identical repeated actions must remount visual and assistive status feedback");
   assert.ok(studio.includes("key={statusRevision}"), "repeated mobile status text must restart its bounded visibility timer");
   assert.ok(studio.includes("<span key={statusRevision}>{status}</span>"), "the live region must stay mounted while repeated messages replace its observed content");
@@ -242,10 +325,24 @@ test("ships product metadata and removes the disposable starter", async () => {
   assert.ok(studio.includes("damaged drafts were preserved; autosave is paused until Save now or New"), "unrecoverable raw drafts must not be overwritten by the fresh score timer");
   assert.ok(studio.includes("Started a fresh score — local storage is unavailable"), "a blocked localStorage getter must still finish hydration with a fresh score");
   assert.ok(studio.includes("if (!hydrated || !autoSaveEnabled) return;"), "autosave must remain gated after an unrecoverable load");
-  assert.match(studio, /finally \{\s*setHydrated\(true\);\s*\}/, "hydration must complete after every storage outcome");
+  assert.ok(studio.includes('window.addEventListener("pagehide", handlePageHide)'), "navigation must synchronously flush a pending debounced save");
+  assert.ok(studio.includes('document.addEventListener("visibilitychange", handleVisibilityChange)'), "backgrounding a mobile tab must flush a pending debounced save");
+  assert.ok(studio.includes("persistScoreLocally(scoreRef.current)"), "exit-time persistence must use the latest score instead of a stale effect closure");
+  assert.ok(studio.includes("if (!autoSaveEnabledRef.current) return false;"), "an edited recovery draft must trigger unload protection while deliberate autosave pause preserves damaged storage");
+  assert.ok(studio.includes("Undid the last edit · autosave paused"), "Undo must not hide a recovery draft's persistence warning");
+  assert.ok(studio.includes("Redid the edit · autosave paused"), "Redo must not hide a recovery draft's persistence warning");
+  assert.ok(studio.includes('input.addEventListener("cancel", restoreFilePickerFocus)'), "cancelling the native file picker must restore a visible editor control");
+  assert.ok(studio.includes("filePickerReturnFocusRef.current === returnFocus"), "browsers without a file-input cancel event need a window-focus fallback");
+  assert.match(studio, /finally \{\s*hydratedRef\.current = true;\s*setHydrated\(true\);\s*\}/, "hydration refs and UI state must complete together after every storage outcome");
   assert.equal((studio.match(/persistScoreLocally\(score\)/g) ?? []).length, 2, "debounced autosave and Save now must share getter-safe failure handling");
   const newScoreHandler = studio.match(/const createFromTemplate = \(templateId: string\) => \{([\s\S]*?)\n {2}\};/)?.[1];
   assert.ok(newScoreHandler?.includes("setMetadataDraft(next.metadata)"), "a new whole-document score must reset the editable metadata draft");
+  assert.ok(newScoreHandler?.includes('preserveUndo ? trimStudioHistory([...past, { score, selection: selectedEventTarget }], "end") : []'), "creating a new score must preserve bounded Undo unless retaining an oversized document would freeze the editor");
+  assert.ok(studio.includes("This large score cannot be kept in Undo without freezing the editor"), "the large-score New escape hatch must disclose its Undo tradeoff before replacement");
+  const importedScoreHandler = studio.match(/const openImportedScore = \(parsed: ScoreDocument, message: string\) => \{([\s\S]*?)\n {2}\};/)?.[1];
+  assert.ok(importedScoreHandler?.includes('planLiveEngraving(previousScore, "score", previousSelectionFallback.partId).kind === "safe"'), "opening a score must assess the previous live document before attempting to retain it");
+  assert.ok(importedScoreHandler?.includes('preserveUndo\n      ? trimStudioHistory([...items, { score: previousScore, selection: previousSelection }], "end")\n      : []'), "opening a score must preserve bounded Undo unless retaining an oversized document would freeze the editor");
+  assert.ok(studio.includes('setStatus("Playback finished")'), "natural playback completion must not be announced as a manual stop");
   assert.doesNotMatch(studio, /localStorage\.setItem\(/, "the UI must not bypass validation and backup rotation");
   for (const [duration, flagCount] of [[1, 0], [2, 0], [4, 0], [8, 1], [16, 2], [32, 3], [64, 4]]) {
     assert.ok(durationIcon.includes(`${duration}: ${flagCount}`), `${duration} duration must preserve its exact visible flag count`);
@@ -264,6 +361,8 @@ test("ships product metadata and removes the disposable starter", async () => {
     "the quick input dock must become a visible, viewport-anchored control at the mobile breakpoint",
   );
   assert.match(styles, /\.mobile-input-meta>button\s*\{[^}]*height:\s*(?:4[4-9]|[5-9]\d)px/, "mobile edit actions must keep a touch-sized target");
+  assert.match(styles, /@media\s*\(max-width:\s*860px\)[\s\S]*?\.note-toolbar \.mode-pill[^{]*\{[^}]*min-height:\s*44px/, "compact notation controls must keep 44px touch targets across the full mobile-editor breakpoint");
+  assert.match(styles, /@media\s*\(max-width:\s*860px\) and \(max-height:\s*600px\)[\s\S]*?\.canvas-controls \.mode-pill\s*\{[^}]*min-height:\s*44px/, "short mobile screens must not shrink measure controls below touch size");
   assert.match(styles, /\.mobile-pitch-keys button\s*\{[^}]*height:\s*(?:4[4-9]|[5-9]\d)px/, "mobile pitch and Rest actions must keep a touch-sized target");
   assert.match(styles, /@media \(max-width: 389px\)[\s\S]*?\.mobile-pitch-keys \.mobile-rest-key \{ display: none; \}/, "narrow input should give seven pitch keys the full row instead of squeezing eight targets together");
   assert.match(styles, /@media\s*\(max-width:\s*1100px\)[\s\S]*?\.app-header\s*\{[^}]*grid-template-columns:\s*70px/, "the mid-width header must compact before playback can overflow it");
@@ -313,7 +412,26 @@ test("ships product metadata and removes the disposable starter", async () => {
   assert.ok(renderer.includes("distance <= 22 / scale"), "near-hit forgiveness must remain 22 screen pixels when the engraving is zoomed");
   assert.ok(renderer.includes("engravingState.source === engravingSource"), "async event and measure geometry must be consumed only for its exact score, rows, and width source");
   assert.ok(renderer.includes("requestId === engravingRequestRef.current && hostRef.current === host"), "async engraving completion and error paths must reject stale requests and hosts");
+  assert.ok(renderer.includes("planLiveEngraving(score, viewMode, selectedPartId)"), "the renderer must plan a bounded visible scope before importing or invoking VexFlow");
+  assert.ok(renderer.includes("if (interactiveRenderBlocked)"), "unsafe single-SVG scores must skip engraving work instead of freezing the main thread");
+  assert.ok(renderer.includes("without changing or truncating the score"), "automatic part fallback must disclose that the document remains intact");
+  assert.ok(renderer.includes("Preparing notation…"), "cold dynamic engraving must expose progress rather than an unexplained blank score");
+  assert.ok(renderer.includes("Retry engraving"), "a transient renderer failure must have an explicit recovery action");
+  const retryHandler = renderer.match(/onClick=\{\(\) => \{([\s\S]*?)\}\}>Retry engraving<\/button>/)?.[1];
+  const retryReset = 'setEngravingState({ source: null, measureLayouts: [], eventLayouts: [], error: "" })';
+  assert.ok(retryHandler?.includes(retryReset), "retrying engraving must clear the stale error and re-enter the aria-busy loading state before drawing again");
+  assert.ok(retryHandler.includes("setRenderAttempt((attempt) => attempt + 1)"), "retrying engraving must launch a fresh render attempt");
+  assert.ok(retryHandler.indexOf(retryReset) < retryHandler.indexOf("setRenderAttempt"), "retrying engraving must reset transient state before launching the fresh render attempt");
   assert.ok(renderer.includes('className="event-selection"'), "the selected event must receive a visible score-local highlight");
+  assert.ok(renderer.includes("accessibleEventLabel(selectedEventDetails.event)"), "the focused score control must retain the exact selected note, chord, or rest description");
+  assert.ok(renderer.includes("selectedEventDetails.part.name"), "the focused score control must retain the selected event's part context");
+  assert.ok(renderer.includes("selectedEventDetails.staffIndex + 1"), "the focused score control must retain the selected event's staff context");
+  assert.ok(renderer.includes("selectedEventDetails.measureId"), "the focused score control must retain the selected event's measure context");
+  assert.ok(renderer.includes("duration.dots === 1"), "selected-event duration context must distinguish dotted values");
+  assert.ok(renderer.includes("duration.dots === 2"), "selected-event duration context must distinguish double-dotted values");
+  assert.ok(renderer.includes("pitchName(note.pitch)"), "selected notes and chord tones must retain their written pitch context");
+  assert.ok(renderer.includes('event.kind === "rest"'), "selected rests must be identified without inventing pitch context");
+  assert.ok(renderer.includes("chord with"), "multi-note events must be identified as chords");
   assert.ok(renderer.includes("Click or tap a note or rest to select it for deletion"), "the accessible score label must explain direct event selection");
   assert.ok(renderer.includes("onKeyDown={handleRowKeyDown}"), "the score surface must expose keyboard staff-row navigation");
   assert.ok(renderer.includes("inputFollowRevision === completedInputFollowRef.current"), "repeated note entry must request one bounded follow-scroll without making pointer selections jump");
@@ -328,6 +446,8 @@ test("ships product metadata and removes the disposable starter", async () => {
   assert.doesNotMatch(pointerHandler, /scroll(?:ScreenRect|StaffRow)IntoView/, "pointer selection must not recenter the score under the user");
   assert.ok(renderer.includes('"--engraving-ui-scale": 1 / scale'), "the scaled score surface must expose inverse optical UI scale");
   assert.ok(styles.includes("calc(2px * var(--engraving-ui-scale,1))"), "selection and cursor strokes must retain their screen-space weight while zoomed");
+  assert.match(styles, /@media print[\s\S]*?\.engraving-surface\s*\{[^}]*width:\s*100%\s*!important[^}]*transform:\s*none\s*!important/, "print output must replace interactive zoom with a page-width surface");
+  assert.match(styles, /@media print[\s\S]*?\.vexflow-host svg\s*\{[^}]*width:\s*100%\s*!important[^}]*height:\s*auto\s*!important/, "print notation must scale the SVG proportionally inside the A4 imageable width");
   assert.ok(renderer.includes("Use the Left and Right Arrow keys to select events"), "the bounded score label must explain keyboard event selection");
   assert.ok(renderer.includes("the Up and Down Arrow keys to select a staff"), "the bounded score label must explain keyboard staff selection");
   assert.doesNotMatch(renderer, /measureOrder\.indexOf\(/, "system layout must not scan the full measure order once per measure");

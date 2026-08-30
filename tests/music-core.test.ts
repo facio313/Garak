@@ -2,13 +2,91 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { FAMILIES, FAMILY_COLORS, INSTRUMENTS, SCORE_TEMPLATES, getInstrument } from "../lib/music/catalog";
 import { keySignaturesEqual, resolveMeasureAccidentals, timeSignaturesEqual } from "../lib/music/engraving";
+import { LIVE_ENGRAVING_LIMITS, measureLiveEngraving, planLiveEngraving } from "../lib/music/engraving-budget";
 import { ARTICULATION_VELOCITY_BONUSES, collectPlaybackNotes, encodeMidiVariableLength, scoreToMidi, scoreToMusicXML, selectPlaybackWindow, STACCATO_GATE_RATIO } from "../lib/music/exporters";
 import { KEY_SIGNATURES, concertToWrittenKey, createWrittenKeySignatureSnapshot, fifthsToVexFlowKey, keySignatureAlterForStep, keySignatureName, writtenKeyForPart } from "../lib/music/key-signatures";
 import { getDefaultBeamGroups, getFullMeasureDuration } from "../lib/music/meter";
 import { ARTICULATIONS, DEFAULT_MIDI_VELOCITY, DURATION_LABELS, DYNAMIC_MARKINGS, DYNAMIC_VELOCITIES, TICKS_PER_QUARTER, durationTicks, eventCount, getPrimaryVoice, measureCapacity, nextAugmentationDotCount, validateScore, voiceTicks, writtenToSounding } from "../lib/music/model";
 import type { MusicEvent, Pitch, ScoreDocument, ScoreNote } from "../lib/music/model";
+import { MAX_NATIVE_SCORE_BYTES, serializeNativeScore } from "../lib/music/native-format";
 import { locatePlaybackPosition } from "../lib/music/playback-position";
 import { addChordTone, addChordToneToEvent, addInstrument, appendEvent, appendMeasure, clearEventToRest, createScore, findEventTargetMeasureId, makeEvent, removeChordToneFromEvent, removeEvent, removeInstrument, removeLastChordTone, removeLastEvent, removeLastMeasure, setEventArticulation, setEventDynamic, setKeyFromMeasure, setLastEventDynamic, setLastNoteArticulation, setMeasureKey, setScoreKey, setTimeFromMeasure, toggleTieLastTwo } from "../lib/music/score";
+
+test("live engraving planning bounds the single-SVG renderer without mutating or truncating a score", () => {
+  const score = createScore("solo", { seedDemo: false });
+  score.measureOrder = Array.from({ length: LIVE_ENGRAVING_LIMITS.measures }, (_, index) => `budget-measure-${index}`);
+  const exact = measureLiveEngraving(score, score.parts);
+  assert.equal(exact.measures, LIVE_ENGRAVING_LIMITS.measures);
+  assert.equal(exact.staffMeasureCells, LIVE_ENGRAVING_LIMITS.measures * 2);
+  assert.equal(planLiveEngraving(score, "part", score.parts[0].id).kind, "safe");
+
+  score.measureOrder.push("budget-measure-over");
+  const beforeBlockedPlan = structuredClone(score);
+  const blocked = planLiveEngraving(score, "part", score.parts[0].id);
+  assert.equal(blocked.kind, "blocked");
+  assert.ok(blocked.exceeded.includes("measures"));
+  assert.deepEqual(score, beforeBlockedPlan);
+
+  const manyParts = createScore("chamber", { seedDemo: false });
+  manyParts.parts = Array.from({ length: LIVE_ENGRAVING_LIMITS.rows + 1 }, (_, index) => ({
+    ...structuredClone(manyParts.parts[0]),
+    id: `budget-part-${index}`,
+  }));
+  const fallback = planLiveEngraving(manyParts, "score", manyParts.parts[0].id);
+  assert.equal(fallback.kind, "part-fallback");
+  assert.equal(fallback.parts.length, 1);
+  assert.ok(fallback.stats.rows > LIVE_ENGRAVING_LIMITS.rows);
+  assert.equal(fallback.renderedStats.rows, 1);
+  assert.ok(fallback.exceeded.includes("rows"));
+});
+
+test("score growth commands preserve the source identity at the staff-measure safety boundary", () => {
+  const score = createScore("chamber", { seedDemo: false });
+  score.parts = [{ ...score.parts[0], staves: [score.parts[0].staves[0]] }];
+  score.measureOrder = Array.from({ length: 10_000 }, (_, index) => `limit-measure-${index + 1}`);
+  score.measures = Object.fromEntries(score.measureOrder.map((id, index) => [id, {
+    id,
+    number: index + 1,
+    time: { numerator: 4, denominator: 4 },
+    key: { fifths: 0, mode: "major" },
+  }]));
+  const staff = score.parts[0].staves[0];
+  staff.measures = Object.fromEntries(score.measureOrder.map((measureId, index) => [measureId, {
+    voices: [{ id: `limit-voice-${index + 1}`, events: [] }],
+  }]));
+  assert.deepEqual(validateScore(score), []);
+  assert.equal(addInstrument(score, "violin"), score, "adding a part must be rejected atomically");
+  assert.equal(appendMeasure(score), score, "adding a measure must be rejected atomically");
+  assert.deepEqual(validateScore(score), [], "rejected commands must not mutate the source");
+});
+
+test("native snapshots are compact and enforce a portable canonical byte ceiling", () => {
+  const score = createScore("solo", { seedDemo: false });
+  const compact = serializeNativeScore(score);
+  assert.equal(compact, JSON.stringify(score));
+  assert.ok(!compact.includes("\n"));
+
+  const oversized = createScore("chamber", { seedDemo: false });
+  oversized.parts = [{ ...oversized.parts[0], staves: [oversized.parts[0].staves[0]] }];
+  oversized.measureOrder = Array.from({ length: 10_000 }, (_, index) => {
+    const prefix = `portable-measure-${index}-`;
+    return prefix + "m".repeat(256 - prefix.length);
+  });
+  oversized.measures = Object.fromEntries(oversized.measureOrder.map((id, index) => [id, {
+    id,
+    number: index + 1,
+    time: { numerator: 4, denominator: 4 },
+    key: { fifths: 0, mode: "major" },
+  }]));
+  const staff = oversized.parts[0].staves[0];
+  staff.measures = Object.fromEntries(oversized.measureOrder.map((measureId, index) => {
+    const prefix = `portable-voice-${index}-`;
+    return [measureId, { voices: [{ id: prefix + "v".repeat(1_024 - prefix.length), events: [] }] }];
+  }));
+  assert.deepEqual(validateScore(oversized), [], "the aggregate byte ceiling must cover a shape that is otherwise schema-valid");
+  assert.ok(JSON.stringify(oversized).length > MAX_NATIVE_SCORE_BYTES);
+  assert.throws(() => serializeNativeScore(oversized), /20 MB portable native-snapshot limit/);
+});
 
 test("duration and meter arithmetic stays exact", () => {
   assert.equal(durationTicks({ base: 1, dots: 0 }), TICKS_PER_QUARTER * 4);
@@ -391,6 +469,40 @@ test("MusicXML exports each part's written key and measure-level key changes", (
   assert.match(clarinetPart, /<key><fifths>-1<\/fifths><mode>minor<\/mode><\/key>/);
   assert.match(clarinetPart, /<transpose><diatonic>-1<\/diatonic><chromatic>-2<\/chromatic><octave-change>0<\/octave-change><\/transpose>/);
   assert.equal((clarinetPart.match(/<key>/g) ?? []).length, 2);
+});
+
+test("MusicXML rejects XML 1.0 forbidden characters with their exact code point", () => {
+  const forbidden = [
+    ["NUL", "\u0000", "U+0000"],
+    ["vertical tab", "\u000b", "U+000B"],
+    ["unit separator", "\u001f", "U+001F"],
+    ["lone high surrogate", "\ud800", "U+D800"],
+    ["lone low surrogate", "\udfff", "U+DFFF"],
+    ["BMP noncharacter", "\ufffe", "U+FFFE"],
+  ] as const;
+
+  for (const [name, character, codePoint] of forbidden) {
+    const score = createScore("solo", { seedDemo: false });
+    score.metadata.title = `Before${character}After`;
+    assert.deepEqual(validateScore(score), [], `${name} remains structurally valid until the format-specific export boundary`);
+    assert.throws(
+      () => scoreToMusicXML(score),
+      {
+        name: "Error",
+        message: `MusicXML text contains XML 1.0 forbidden character ${codePoint}.`,
+      },
+      name,
+    );
+  }
+});
+
+test("MusicXML preserves allowed XML 1.0 whitespace and emoji while escaping markup characters", () => {
+  const score = createScore("solo", { seedDemo: false });
+  score.metadata.title = "Tab\tLine\nReturn\rEmoji 😀 & < > \" '";
+
+  const musicXml = scoreToMusicXML(score);
+  assert.ok(musicXml.includes("<work-title>Tab\tLine\nReturn\rEmoji 😀 &amp; &lt; &gt; &quot; &apos;</work-title>"));
+  assert.doesNotMatch(musicXml, /Emoji 😀 & < > "/);
 });
 
 test("MusicXML part-list assigns pitched channels without using unpitched channel 10", () => {
@@ -2147,6 +2259,32 @@ test("live playback articulates consecutive 64th notes at normal and fast tempos
     assert.ok(notes[0].durationSeconds < notes[1].startSeconds - notes[0].startSeconds, `${tempo} BPM gates before the next onset`);
     assert.ok(notes[0].durationSeconds >= .005);
   }
+});
+
+test("part-scoped live playback traverses only the visible part while preserving global mute and solo rules", () => {
+  const score = createScore("chamber", { seedDemo: false });
+  const measureId = score.measureOrder[0];
+  const [visiblePart, hiddenPart] = score.parts;
+  getPrimaryVoice(visiblePart, measureId).events = [makeEvent({
+    id: "visible-part-note",
+    pitch: { step: "C", alter: 0, octave: 4 },
+    duration: { base: 4, dots: 0 },
+    rest: false,
+  })];
+  getPrimaryVoice(hiddenPart, measureId).events = [makeEvent({
+    id: "hidden-part-note",
+    pitch: { step: "G", alter: 0, octave: 4 },
+    duration: { base: 4, dots: 0 },
+    rest: false,
+  })];
+
+  const visibleOnly = collectPlaybackNotes(score, [visiblePart.id]);
+  assert.equal(visibleOnly.length, 1);
+  assert.equal(visibleOnly[0].partId, visiblePart.id);
+  assert.ok(!visibleOnly.some((note) => note.partId === hiddenPart.id));
+
+  hiddenPart.solo = true;
+  assert.deepEqual(collectPlaybackNotes(score, [visiblePart.id]), [], "a hidden solo flag must retain the score's global audition semantics");
 });
 
 test("bounded live playback is chronological and fair across simultaneous parts", () => {

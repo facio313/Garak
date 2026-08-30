@@ -24,14 +24,17 @@ import {
   Volume2,
   X,
 } from "lucide-react";
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { INSTRUMENTS, SCORE_TEMPLATES } from "../lib/music/catalog";
 import { collectPlaybackNotes, scoreToMidi, scoreToMusicXML, selectPlaybackWindow } from "../lib/music/exporters";
+import { planLiveEngraving } from "../lib/music/engraving-budget";
 import { trimHistorySnapshots } from "../lib/music/history";
 import { KEY_SIGNATURES, keySignatureAlterForStep, keySignatureName, writtenKeyForPart } from "../lib/music/key-signatures";
 import type { KeySignature } from "../lib/music/key-signatures";
 import type { Articulation, DurationBase, DurationValue, DynamicMarking, MusicEvent, PitchStep, ScoreDocument, ScoreNote } from "../lib/music/model";
 import { ARTICULATIONS, DURATION_LABELS, DYNAMIC_MARKINGS, TICKS_PER_QUARTER, durationTicks, eventCount, getPrimaryVoice, nextAugmentationDotCount, pitchName, resolveStaffIndex, validateScore, voiceTicks } from "../lib/music/model";
+import { MAX_MUSICXML_FILE_BYTES, MAX_NATIVE_FILE_BYTES, serializeNativeScore } from "../lib/music/native-format";
 import { locatePlaybackPosition } from "../lib/music/playback-position";
 import { addChordTone, addChordToneToEvent, addInstrument, appendEvent, appendMeasure, clearEventToRest, createScore, findEventTargetMeasureId, makeEvent, removeChordToneFromEvent, removeEvent, removeInstrument, removeLastChordTone, removeLastEvent, removeLastMeasure, setEventArticulation, setEventDynamic, setKeyFromMeasure, setLastEventDynamic, setLastNoteArticulation, setTimeFromMeasure, toggleTieLastTwo, updatePart } from "../lib/music/score";
 import { loadStoredScore, saveStoredScore } from "../lib/music/storage";
@@ -123,8 +126,8 @@ function scoreNotatedDurationSeconds(score: ScoreDocument): number {
   return totalTicks * 60 / score.tempo / TICKS_PER_QUARTER;
 }
 
-function scoreHasNotes(score: ScoreDocument): boolean {
-  return score.parts.some((part) => part.staves.some((staff) => score.measureOrder.some((measureId) =>
+function scoreHasNotes(score: ScoreDocument, includedPartIds?: ReadonlySet<string>): boolean {
+  return score.parts.some((part) => (!includedPartIds || includedPartIds.has(part.id)) && part.staves.some((staff) => score.measureOrder.some((measureId) =>
     staff.measures[measureId]?.voices.some((voice) => voice.events.some((event) => event.kind === "note")),
   )));
 }
@@ -206,7 +209,7 @@ function persistScoreLocally(score: ScoreDocument): string {
 
 function statusTone(message: string): StatusTone {
   const normalized = message.toLowerCase();
-  if (/failed|not saved|invalid|could not|unavailable|larger than/.test(normalized)) return "error";
+  if (/failed|not saved|not applied|not added|invalid|could not|unavailable|larger than|safety limit|required|unexpected/.test(normalized)) return "error";
   if (/paused|warning|last-known-good|damaged|review/.test(normalized)) return "warning";
   if (/saved locally|ready|recovered your local score/.test(normalized)) return "success";
   return "neutral";
@@ -238,7 +241,7 @@ export function NotationStudio() {
   const [exportOpen, setExportOpen] = useState(false);
   const [mobileToolsOpen, setMobileToolsOpen] = useState(false);
   const [inputFollowRevision, requestInputFollow] = useReducer((revision: number) => revision + 1, 0);
-  const [selectedEventTarget, setSelectedEventTarget] = useState<ScoreEventSelection | null>(null);
+  const [selectedEventTarget, setSelectedEventTargetState] = useState<ScoreEventSelection | null>(null);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [inspectorDrawerMode, setInspectorDrawerMode] = useState(false);
   const [instrumentsOpen, setInstrumentsOpen] = useState(false);
@@ -248,10 +251,13 @@ export function NotationStudio() {
   const [playing, setPlaying] = useState(false);
   const [playbackSeconds, setPlaybackSeconds] = useState<number | null>(null);
   const [metadataDraft, setMetadataDraft] = useState(score.metadata);
+  const [titleError, setTitleError] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const openFileButtonRef = useRef<HTMLButtonElement>(null);
   const projectTitleRef = useRef<HTMLButtonElement>(null);
   const exportButtonRef = useRef<HTMLButtonElement>(null);
+  const exportAnchorRef = useRef<HTMLDivElement>(null);
+  const mobileInstrumentsButtonRef = useRef<HTMLButtonElement>(null);
   const filePickerReturnFocusRef = useRef<HTMLElement | null>(null);
   const modalReturnFocusRef = useRef<HTMLElement | null>(null);
   const notationToolsRef = useRef<HTMLElement>(null);
@@ -261,8 +267,22 @@ export function NotationStudio() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const playbackTimerRef = useRef<number | null>(null);
   const saveTimerRef = useRef<number | null>(null);
+  const scoreRef = useRef(score);
+  const selectedEventTargetRef = useRef<ScoreEventSelection | null>(selectedEventTarget);
+  const importRequestIdRef = useRef(0);
+  const hydratedRef = useRef(hydrated);
+  const autoSaveEnabledRef = useRef(autoSaveEnabled);
+  const savePendingRef = useRef(false);
   const autoZoomRef = useRef(true);
   const lastFocusedControlRef = useRef<HTMLElement | null>(null);
+  const setSelectedEventTarget = useCallback((selection: ScoreEventSelection | null) => {
+    selectedEventTargetRef.current = selection;
+    setSelectedEventTargetState(selection);
+  }, []);
+
+  useEffect(() => { scoreRef.current = score; }, [score]);
+  useEffect(() => { hydratedRef.current = hydrated; }, [hydrated]);
+  useEffect(() => { autoSaveEnabledRef.current = autoSaveEnabled; }, [autoSaveEnabled]);
 
   useEffect(() => {
     const rememberFocus = (event: FocusEvent) => {
@@ -391,14 +411,58 @@ export function NotationStudio() {
     setInstrumentsOpen(false);
     setHelpOpen(true);
   }, [captureModalReturnFocus]);
+  const openInstrumentDialog = useCallback(() => {
+    const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    modalReturnFocusRef.current = active?.closest("#instrument-drawer")
+      && mobileInstrumentsButtonRef.current?.getClientRects().length
+      ? mobileInstrumentsButtonRef.current
+      : captureModalReturnFocus();
+    setExportOpen(false);
+    setInstrumentsOpen(false);
+    setAddOpen(true);
+  }, [captureModalReturnFocus]);
+  const restoreFilePickerFocus = useCallback(() => {
+    const returnFocus = filePickerReturnFocusRef.current;
+    if (!returnFocus) return;
+    filePickerReturnFocusRef.current = null;
+    window.requestAnimationFrame(() => {
+      const focusTarget = returnFocus.isConnected && returnFocus.getClientRects().length
+        ? returnFocus
+        : exportButtonRef.current?.getClientRects().length
+          ? exportButtonRef.current
+          : projectTitleRef.current;
+      focusTarget?.focus();
+    });
+  }, []);
   const openFilePicker = useCallback((returnFocus: HTMLElement | null) => {
     filePickerReturnFocusRef.current = returnFocus;
     setExportOpen(false);
     window.addEventListener("focus", () => {
-      window.setTimeout(() => { filePickerReturnFocusRef.current = null; }, 500);
+      window.setTimeout(() => {
+        if (filePickerReturnFocusRef.current === returnFocus) restoreFilePickerFocus();
+      }, 300);
     }, { once: true });
     fileInputRef.current?.click();
+  }, [restoreFilePickerFocus]);
+  useEffect(() => {
+    const input = fileInputRef.current;
+    if (!input) return;
+    input.addEventListener("cancel", restoreFilePickerFocus);
+    return () => input.removeEventListener("cancel", restoreFilePickerFocus);
+  }, [restoreFilePickerFocus]);
+  const closeExportMenuAndRestoreFocus = useCallback(() => {
+    setExportOpen(false);
+    window.requestAnimationFrame(() => exportButtonRef.current?.focus());
   }, []);
+
+  useEffect(() => {
+    if (!exportOpen) return;
+    const dismissOutside = (event: PointerEvent) => {
+      if (event.target instanceof Node && !exportAnchorRef.current?.contains(event.target)) setExportOpen(false);
+    };
+    document.addEventListener("pointerdown", dismissOutside);
+    return () => document.removeEventListener("pointerdown", dismissOutside);
+  }, [exportOpen]);
 
   useEffect(() => {
     if (!activeDialogOpen) return;
@@ -470,6 +534,7 @@ export function NotationStudio() {
 
   const toggleMobileTools = useCallback(() => {
     const next = !mobileToolsOpen;
+    setExportOpen(false);
     setMobileToolsOpen(next);
     window.requestAnimationFrame(() => {
       if (next) {
@@ -521,6 +586,11 @@ export function NotationStudio() {
         : deletionTargetEvent
           ? `Delete previous ${eventName(deletionTargetEvent)}`
       : "Nothing to delete";
+  const inspectorDeleteText = deleteRemovesChordTone
+    ? "Remove last chord tone"
+    : inspectorUsesSelection
+      ? selectedEvent?.kind === "note" ? "Clear note to rest" : "Delete selected rest"
+      : "Delete previous input";
   const lastNoteTarget = selectedPart ? findLastNoteEvent(score, selectedPart.id, selectedStaffIndex) : null;
   const lastNoteEvent = lastNoteTarget?.event;
   const inspectorNoteEvent = selectedEvent
@@ -528,6 +598,7 @@ export function NotationStudio() {
     : lastNoteEvent;
   const previewDuration: DurationValue = { base: duration, dots: dotCount };
   const canAddChordTone = Boolean(chordTarget);
+  const chordActionTarget = selectedChordTarget ? "selected note chord" : "latest note chord";
   const previewMeasureId = selectedPart && activeStaffId
     ? canAddChordTone
       ? chordTarget?.measureId ?? null
@@ -544,6 +615,21 @@ export function NotationStudio() {
     : 0;
   const totalEvents = selectedPart && selectedStaff ? eventCount(score, selectedPart.id, selectedStaff.id) : 0;
   const playbackPosition = playbackSeconds === null ? null : locatePlaybackPosition(score, playbackSeconds);
+  const liveEngravingPlan = useMemo(
+    () => planLiveEngraving(score, viewMode, selectedPartId),
+    [score, selectedPartId, viewMode],
+  );
+  const wholeScoreEngravingPlan = useMemo(
+    () => planLiveEngraving(score, "score", selectedPartId),
+    [score, selectedPartId],
+  );
+  const liveEngravingUnavailable = liveEngravingPlan.kind !== "safe";
+  const largeScoreEditingPaused = wholeScoreEngravingPlan.kind !== "safe";
+  const guardLargeScoreEditing = useCallback(() => {
+    if (!largeScoreEditingPaused) return false;
+    setStatus("Editing paused for this large score to keep the app responsive — viewing, saving, and export remain available");
+    return true;
+  }, [largeScoreEditingPaused]);
   const inputTargetLabel = selectedPart && activeStaffId
     ? previewMeasureId
       ? `${selectedPart.shortName} · Staff ${selectedStaffNumber} · m. ${score.measures[previewMeasureId].number}`
@@ -553,10 +639,12 @@ export function NotationStudio() {
   const selectPart = useCallback((partId: string) => {
     const part = score.parts.find((candidate) => candidate.id === partId);
     if (!part) return;
+    const staff = part.staves.find((candidate) => candidate.id === selectedStaffId) ?? part.staves[0];
     setSelectedPartId(part.id);
-    setSelectedStaffId((current) => part.staves.some((staff) => staff.id === current) ? current : part.staves[0]?.id ?? "");
+    setSelectedStaffId(staff?.id ?? "");
     setSelectedEventTarget(null);
-  }, [score.parts]);
+    setStatus(`Selected ${part.name}, staff ${Math.max(1, part.staves.findIndex((candidate) => candidate.id === staff?.id) + 1)} · event selection cleared`);
+  }, [score.parts, selectedStaffId, setSelectedEventTarget]);
 
   const selectStaff = useCallback((staffId: string) => {
     const part = score.parts.find((candidate) => candidate.staves.some((staff) => staff.id === staffId));
@@ -564,38 +652,62 @@ export function NotationStudio() {
     setSelectedPartId(part.id);
     setSelectedStaffId(staffId);
     setSelectedEventTarget(null);
-  }, [score.parts]);
+    setStatus(`Selected ${part.name}, staff ${part.staves.findIndex((staff) => staff.id === staffId) + 1} · event selection cleared`);
+  }, [score.parts, setSelectedEventTarget]);
 
   const selectRenderedEvent = useCallback((selection: ScoreEventSelection | null) => {
     setSelectedEventTarget(selection);
     const event = eventAtSelection(score, selection);
     if (event && selection) {
       setChangeMeasureId(selection.measureId);
+      const part = score.parts.find((candidate) => candidate.id === selection.partId);
+      const staffNumber = Math.max(1, (part?.staves.findIndex((staff) => staff.id === selection.staffId) ?? 0) + 1);
+      const measureNumber = score.measures[selection.measureId]?.number;
+      const location = `${part?.shortName ?? "Part"} · staff ${staffNumber}${measureNumber ? ` · measure ${measureNumber}` : ""}`;
       const removesChordTone = chordMode
         && event.kind === "note"
         && event.notes.length > 1;
       setStatus(removesChordTone
-        ? `Selected ${eventName(event)} · Delete removes its last chord tone`
+        ? `Selected ${eventName(event)} · ${location} · Delete removes its last chord tone`
         : event.kind === "note"
-          ? `Selected ${eventName(event)} · Delete clears it to a rest; Shift+Delete removes its time`
-          : `Selected ${eventName(event)} · Delete removes this rest and shifts later events earlier`);
+          ? `Selected ${eventName(event)} · ${location} · Delete clears it to a rest; Shift+Delete removes its time`
+          : `Selected ${eventName(event)} · ${location} · Delete removes this rest and shifts later events earlier`);
     } else if (selection === null) {
-      setStatus("Input caret selected · new notes append at the blue NEXT marker");
+      setStatus("Event selection cleared · new notes append at the blue NEXT marker");
     }
-  }, [chordMode, score]);
+  }, [chordMode, score, setSelectedEventTarget]);
 
   const cancelPlayback = useCallback(() => {
     if (playbackTimerRef.current) window.clearInterval(playbackTimerRef.current);
     playbackTimerRef.current = null;
-    void audioContextRef.current?.close();
+    const context = audioContextRef.current;
     audioContextRef.current = null;
     setPlaying(false);
     setPlaybackSeconds(null);
+    if (context) {
+      try {
+        void context.close().catch(() => undefined);
+      } catch {
+        // Cleanup state is already detached; a broken browser close cannot revive playback.
+      }
+    }
   }, []);
 
   const commit = useCallback((next: ScoreDocument, message: string) => {
+    if (guardLargeScoreEditing()) return;
     if (next === score) {
       setStatus(message);
+      return;
+    }
+    const validationErrors = validateScore(next);
+    if (validationErrors.length) {
+      setStatus(`Edit not applied — ${validationErrors[0]}`);
+      return;
+    }
+    try {
+      serializeNativeScore(next);
+    } catch (error) {
+      setStatus(`Edit not applied — ${error instanceof Error ? error.message : "the score exceeds the portable snapshot limit"}`);
       return;
     }
     cancelPlayback();
@@ -603,12 +715,14 @@ export function NotationStudio() {
     const retainedHistory = trimStudioHistory(proposedHistory, "end");
     setPast(retainedHistory);
     setFuture([]);
+    scoreRef.current = next;
+    savePendingRef.current = true;
     setScore(next);
     const editStatus = retainedHistory.length < proposedHistory.length
       ? `${message} · oldest undo steps released to protect memory`
       : message;
     setStatus(autoSaveEnabled ? editStatus : `${editStatus} · autosave paused — use Save now or New to replace preserved drafts`);
-  }, [autoSaveEnabled, cancelPlayback, past, score, selectedEventTarget]);
+  }, [autoSaveEnabled, cancelPlayback, guardLargeScoreEditing, past, score, selectedEventTarget]);
 
   const undo = useCallback(() => {
     if (!past.length) return;
@@ -616,10 +730,13 @@ export function NotationStudio() {
     const previous = past[past.length - 1];
     setPast((items) => items.slice(0, -1));
     setFuture((items) => trimStudioHistory([{ score, selection: selectedEventTarget }, ...items], "start"));
+    scoreRef.current = previous.score;
+    savePendingRef.current = true;
     setScore(previous.score);
     const restoredSelection = revalidateEventSelection(previous.score, previous.selection);
     setSelectedEventTarget(restoredSelection);
     setMetadataDraft(previous.score.metadata);
+    setTitleError("");
     const selection = safeSelection(
       previous.score,
       restoredSelection?.partId ?? selectedPartId,
@@ -627,8 +744,10 @@ export function NotationStudio() {
     );
     setSelectedPartId(selection.partId);
     setSelectedStaffId(selection.staffId);
-    setStatus("Undid the last edit");
-  }, [cancelPlayback, past, score, selectedEventTarget, selectedPartId, selectedStaffId]);
+    setStatus(autoSaveEnabled
+      ? "Undid the last edit"
+      : "Undid the last edit · autosave paused — use Save now or New to replace preserved drafts");
+  }, [autoSaveEnabled, cancelPlayback, past, score, selectedEventTarget, selectedPartId, selectedStaffId, setSelectedEventTarget]);
 
   const redo = useCallback(() => {
     if (!future.length) return;
@@ -636,10 +755,13 @@ export function NotationStudio() {
     const next = future[0];
     setFuture((items) => items.slice(1));
     setPast((items) => trimStudioHistory([...items, { score, selection: selectedEventTarget }], "end"));
+    scoreRef.current = next.score;
+    savePendingRef.current = true;
     setScore(next.score);
     const restoredSelection = revalidateEventSelection(next.score, next.selection);
     setSelectedEventTarget(restoredSelection);
     setMetadataDraft(next.score.metadata);
+    setTitleError("");
     const selection = safeSelection(
       next.score,
       restoredSelection?.partId ?? selectedPartId,
@@ -647,14 +769,17 @@ export function NotationStudio() {
     );
     setSelectedPartId(selection.partId);
     setSelectedStaffId(selection.staffId);
-    setStatus("Redid the edit");
-  }, [cancelPlayback, future, score, selectedEventTarget, selectedPartId, selectedStaffId]);
+    setStatus(autoSaveEnabled
+      ? "Redid the edit"
+      : "Redid the edit · autosave paused — use Save now or New to replace preserved drafts");
+  }, [autoSaveEnabled, cancelPlayback, future, score, selectedEventTarget, selectedPartId, selectedStaffId, setSelectedEventTarget]);
 
   useEffect(() => {
     queueMicrotask(() => {
       try {
         const stored = loadStoredScore(window.localStorage);
         if (stored.kind === "loaded") {
+          scoreRef.current = stored.score;
           setScore(stored.score);
           const selection = safeSelection(stored.score);
           setSelectedPartId(selection.partId);
@@ -664,18 +789,23 @@ export function NotationStudio() {
           setStatus(stored.source === "backup"
             ? "Recovered the last-known-good backup — the damaged latest draft was preserved; autosave is paused until Save now or New"
             : "Recovered your local score");
+          autoSaveEnabledRef.current = stored.source === "primary";
           setAutoSaveEnabled(stored.source === "primary");
         } else if (stored.reason === "empty") {
           setStatus("Ready — changes save on this device");
+          autoSaveEnabledRef.current = true;
           setAutoSaveEnabled(true);
         } else {
+          autoSaveEnabledRef.current = false;
           setAutoSaveEnabled(false);
           setStatus("Started a fresh score — damaged drafts were preserved; autosave is paused until Save now or New");
         }
       } catch {
+        autoSaveEnabledRef.current = false;
         setAutoSaveEnabled(false);
         setStatus("Started a fresh score — local storage is unavailable; autosave is paused");
       } finally {
+        hydratedRef.current = true;
         setHydrated(true);
       }
     });
@@ -686,6 +816,7 @@ export function NotationStudio() {
     if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
     saveTimerRef.current = window.setTimeout(() => {
       const nextStatus = persistScoreLocally(score);
+      savePendingRef.current = nextStatus !== "Saved locally";
       if (nextStatus !== "Saved locally") setStatus(nextStatus);
     }, 450);
     return () => { if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current); };
@@ -693,13 +824,53 @@ export function NotationStudio() {
 
   const saveNow = useCallback(() => {
     const nextStatus = persistScoreLocally(score);
+    savePendingRef.current = nextStatus !== "Saved locally";
     setStatus(nextStatus);
-    if (nextStatus === "Saved locally") setAutoSaveEnabled(true);
+    if (nextStatus === "Saved locally") {
+      autoSaveEnabledRef.current = true;
+      setAutoSaveEnabled(true);
+    }
   }, [score]);
+
+  useEffect(() => {
+    const flushPendingSave = (): boolean => {
+      if (!hydratedRef.current || !savePendingRef.current) return true;
+      if (!autoSaveEnabledRef.current) return false;
+      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+      const nextStatus = persistScoreLocally(scoreRef.current);
+      const saved = nextStatus === "Saved locally";
+      savePendingRef.current = !saved;
+      return saved;
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== "hidden") return;
+      if (!flushPendingSave()) setStatus("Local save failed — keep this tab open and export a Garak JSON backup");
+    };
+    const handlePageHide = () => { flushPendingSave(); };
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (flushPendingSave()) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("pagehide", handlePageHide);
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("pagehide", handlePageHide);
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
+  }, []);
 
   const stopPlayback = useCallback(() => {
     cancelPlayback();
     setStatus("Playback stopped");
+  }, [cancelPlayback]);
+
+  const finishPlayback = useCallback(() => {
+    cancelPlayback();
+    setStatus("Playback finished");
   }, [cancelPlayback]);
 
   const playScore = useCallback(() => {
@@ -707,56 +878,89 @@ export function NotationStudio() {
       stopPlayback();
       return;
     }
-    const playbackWindow = selectPlaybackWindow(collectPlaybackNotes(score), 600);
-    const notes = playbackWindow.notes;
-    if (!notes.length) {
-      setStatus(scoreHasNotes(score)
-        ? "No audible notes — check the instrument Mute and Solo controls"
-        : "Add a note before playback");
+    if (liveEngravingUnavailable) {
+      setStatus("Playback unavailable while interactive engraving is paused — switch to a smaller part view first");
       return;
     }
-    const context = new AudioContext();
-    const master = context.createGain();
-    master.gain.value = Math.min(.32, .9 / Math.sqrt(Math.max(1, score.parts.length)));
-    master.connect(context.destination);
-    const start = context.currentTime + .08;
-    const audioTotal = Math.max(...notes.map((note) => note.startSeconds + note.durationSeconds));
-    const windowNotatedTotal = Math.max(...notes.map((note) => note.startSeconds + note.notatedDurationSeconds));
-    const total = playbackWindow.truncated
-      ? Math.max(audioTotal, windowNotatedTotal)
-      : Math.max(audioTotal, scoreNotatedDurationSeconds(score));
-    notes.forEach((item) => {
-      const oscillator = context.createOscillator();
-      const gain = context.createGain();
-      const part = score.parts.find((candidate) => candidate.id === item.partId);
-      oscillator.type = part?.instrument.family === "Brass" ? "sawtooth" : part?.instrument.family === "Strings" ? "triangle" : "sine";
-      oscillator.frequency.value = 440 * 2 ** ((item.midi - 69) / 12);
-      const noteStart = start + item.startSeconds;
-      const noteEnd = noteStart + item.durationSeconds;
-      const attackSeconds = Math.min(.018, item.durationSeconds * .35);
-      const peakGain = .015 + item.velocity / 127 * .105;
-      gain.gain.setValueAtTime(.0001, noteStart);
-      gain.gain.exponentialRampToValueAtTime(peakGain, noteStart + attackSeconds);
-      gain.gain.exponentialRampToValueAtTime(.0001, noteEnd);
-      oscillator.connect(gain).connect(master);
-      oscillator.start(noteStart);
-      oscillator.stop(noteEnd + .02);
-    });
-    audioContextRef.current = context;
-    void context.resume();
-    setPlaying(true);
-    setPlaybackSeconds(0);
-    setStatus(playbackWindow.truncated
-      ? `Playing the first ${notes.length} of ${countLabel(playbackWindow.total, "note")} at ♩ = ${score.tempo}`
-      : `Playing ${countLabel(notes.length, "note")} at ♩ = ${score.tempo}`);
-    playbackTimerRef.current = window.setInterval(() => {
-      const elapsed = Math.max(0, context.currentTime - start);
-      setPlaybackSeconds(Math.min(total, elapsed));
-      if (elapsed >= total) stopPlayback();
-    }, 40);
-  }, [playing, score, stopPlayback]);
+    const playbackPartIds = viewMode === "part" && selectedPart ? [selectedPart.id] : undefined;
+    const playbackPartSet = playbackPartIds ? new Set(playbackPartIds) : undefined;
+    const playbackWindow = selectPlaybackWindow(collectPlaybackNotes(score, playbackPartIds), 600);
+    const notes = playbackWindow.notes;
+    if (!notes.length) {
+      setStatus(scoreHasNotes(score, playbackPartSet)
+        ? "No audible notes — check the instrument Mute and Solo controls"
+        : viewMode === "part" ? "Add a note to this part before playback" : "Add a note before playback");
+      return;
+    }
+    if (typeof AudioContext === "undefined") {
+      setStatus("Playback is unavailable in this browser");
+      return;
+    }
+    let context: AudioContext | null = null;
+    try {
+      context = new AudioContext();
+      const master = context.createGain();
+      master.gain.value = Math.min(.32, .9 / Math.sqrt(Math.max(1, playbackPartIds?.length ?? score.parts.length)));
+      master.connect(context.destination);
+      const start = context.currentTime + .08;
+      const audioTotal = Math.max(...notes.map((note) => note.startSeconds + note.durationSeconds));
+      const windowNotatedTotal = Math.max(...notes.map((note) => note.startSeconds + note.notatedDurationSeconds));
+      const total = playbackWindow.truncated
+        ? Math.max(audioTotal, windowNotatedTotal)
+        : Math.max(audioTotal, scoreNotatedDurationSeconds(score));
+      notes.forEach((item) => {
+        const oscillator = context!.createOscillator();
+        const gain = context!.createGain();
+        const part = score.parts.find((candidate) => candidate.id === item.partId);
+        oscillator.type = part?.instrument.family === "Brass" ? "sawtooth" : part?.instrument.family === "Strings" ? "triangle" : "sine";
+        oscillator.frequency.value = 440 * 2 ** ((item.midi - 69) / 12);
+        const noteStart = start + item.startSeconds;
+        const noteEnd = noteStart + item.durationSeconds;
+        const attackSeconds = Math.min(.018, item.durationSeconds * .35);
+        const peakGain = .015 + item.velocity / 127 * .105;
+        gain.gain.setValueAtTime(.0001, noteStart);
+        gain.gain.exponentialRampToValueAtTime(peakGain, noteStart + attackSeconds);
+        gain.gain.exponentialRampToValueAtTime(.0001, noteEnd);
+        oscillator.connect(gain).connect(master);
+        oscillator.start(noteStart);
+        oscillator.stop(noteEnd + .02);
+      });
+      audioContextRef.current = context;
+      void context.resume().catch(() => {
+        if (audioContextRef.current !== context) return;
+        cancelPlayback();
+        setStatus("Playback could not start — check this browser's audio permissions");
+      });
+      setPlaying(true);
+      setPlaybackSeconds(0);
+      const playbackScope = viewMode === "part" && selectedPart ? ` · ${selectedPart.name} part` : "";
+      setStatus(playbackWindow.truncated
+        ? `Playing the first ${notes.length} of ${countLabel(playbackWindow.total, "note")} at ♩ = ${score.tempo}${playbackScope}`
+        : `Playing ${countLabel(notes.length, "note")} at ♩ = ${score.tempo}${playbackScope}`);
+      playbackTimerRef.current = window.setInterval(() => {
+        const elapsed = Math.max(0, context!.currentTime - start);
+        setPlaybackSeconds(Math.min(total, elapsed));
+        if (elapsed >= total) finishPlayback();
+      }, 40);
+    } catch {
+      audioContextRef.current = null;
+      if (playbackTimerRef.current) window.clearInterval(playbackTimerRef.current);
+      playbackTimerRef.current = null;
+      setPlaying(false);
+      setPlaybackSeconds(null);
+      setStatus("Playback could not start — this browser could not prepare the audio graph");
+      if (context) {
+        try {
+          void context.close().catch(() => undefined);
+        } catch {
+          // State is already idle even when a browser's close implementation is broken.
+        }
+      }
+    }
+  }, [cancelPlayback, finishPlayback, liveEngravingUnavailable, playing, score, selectedPart, stopPlayback, viewMode]);
 
   const enterEvent = useCallback((step: PitchStep, forceRest = false) => {
+    if (guardLargeScoreEditing()) return;
     const part = score.parts.find((candidate) => candidate.id === selectedPartId) ?? score.parts[0];
     if (!part) return;
     const staffIndex = resolveStaffIndex(part, selectedStaffId);
@@ -829,9 +1033,10 @@ export function NotationStudio() {
         requestInputFollow();
       }
     }
-  }, [accidentalMode, chordMode, commit, dotCount, duration, octave, score, selectedEvent, selectedEventTarget, selectedPartId, selectedStaffId]);
+  }, [accidentalMode, chordMode, commit, dotCount, duration, guardLargeScoreEditing, octave, score, selectedEvent, selectedEventTarget, selectedPartId, selectedStaffId, setSelectedEventTarget]);
 
   const toggleTie = useCallback(() => {
+    if (guardLargeScoreEditing()) return;
     const part = score.parts.find((candidate) => candidate.id === selectedPartId) ?? score.parts[0];
     if (!part) return;
     const staffIndex = resolveStaffIndex(part, selectedStaffId);
@@ -839,9 +1044,10 @@ export function NotationStudio() {
     const result = toggleTieLastTwo(score, part.id, part.staves[staffIndex].id);
     if (result.error) setStatus(result.error);
     else commit(result.score, result.tied ? "Tied the last two notes" : "Removed the tie");
-  }, [commit, score, selectedPartId, selectedStaffId]);
+  }, [commit, guardLargeScoreEditing, score, selectedPartId, selectedStaffId]);
 
   const removeChordTone = useCallback(() => {
+    if (guardLargeScoreEditing()) return;
     const part = score.parts.find((candidate) => candidate.id === selectedPartId) ?? score.parts[0];
     if (!part) {
       setStatus("Select an instrument first.");
@@ -867,9 +1073,10 @@ export function NotationStudio() {
       return;
     }
     commit(result.score, `Removed ${pitchName(result.removedNote.pitch)} · Chord · ${countLabel(result.remainingNoteCount, "note")} · Undo is available`);
-  }, [commit, score, selectedEvent, selectedEventTarget, selectedPartId, selectedStaffId]);
+  }, [commit, guardLargeScoreEditing, score, selectedEvent, selectedEventTarget, selectedPartId, selectedStaffId]);
 
   const removeLatestInput = useCallback((collapseTime = false) => {
+    if (guardLargeScoreEditing()) return;
     if (deleteRemovesChordTone && !collapseTime) {
       removeChordTone();
       return;
@@ -922,9 +1129,10 @@ export function NotationStudio() {
       `Deleted ${eventName(lastEvent)} from staff ${selectedStaffNumber} · Undo is available`,
     );
     setSelectedEventTarget(null);
-  }, [activeStaffId, commit, deleteRemovesChordTone, lastEvent, removeChordTone, score, selectedEvent, selectedEventTarget, selectedPart, selectedStaffNumber]);
+  }, [activeStaffId, commit, deleteRemovesChordTone, guardLargeScoreEditing, lastEvent, removeChordTone, score, selectedEvent, selectedEventTarget, selectedPart, selectedStaffNumber, setSelectedEventTarget]);
 
   const applyDynamic = useCallback((dynamic: DynamicMarking | null) => {
+    if (guardLargeScoreEditing()) return;
     const part = score.parts.find((candidate) => candidate.id === selectedPartId) ?? score.parts[0];
     if (!part) {
       setStatus("Select an instrument first.");
@@ -962,9 +1170,10 @@ export function NotationStudio() {
         ? `Set ${dynamic} on the ${targetsSelection ? "selected" : "last"} event · staff ${staffIndex + 1}`
         : `Cleared the ${targetsSelection ? "selected" : "last"} event dynamic · staff ${staffIndex + 1}`,
     );
-  }, [commit, score, selectedEvent, selectedEventTarget, selectedPartId, selectedStaffId]);
+  }, [commit, guardLargeScoreEditing, score, selectedEvent, selectedEventTarget, selectedPartId, selectedStaffId]);
 
   const applyArticulation = useCallback((articulation: Articulation | null) => {
+    if (guardLargeScoreEditing()) return;
     const part = score.parts.find((candidate) => candidate.id === selectedPartId) ?? score.parts[0];
     if (!part) {
       setStatus("Select an instrument first.");
@@ -1006,7 +1215,7 @@ export function NotationStudio() {
         ? `Set ${articulation} on the ${targetsSelection ? "selected" : "last"} note · staff ${staffIndex + 1}`
         : `Cleared the ${targetsSelection ? "selected" : "last"} note articulation · staff ${staffIndex + 1}`,
     );
-  }, [commit, score, selectedEvent, selectedEventTarget, selectedPartId, selectedStaffId]);
+  }, [commit, guardLargeScoreEditing, score, selectedEvent, selectedEventTarget, selectedPartId, selectedStaffId]);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -1021,18 +1230,26 @@ export function NotationStudio() {
       }
       if (activeDialogOpen) return;
       const textEntry = target?.matches("input, textarea, select, [contenteditable='true']");
-      const notationToolbarButton = target?.matches("button") && Boolean(target.closest(".note-toolbar, .mobile-input-dock"));
-      const unrelatedButton = target?.matches("button") && !target.classList.contains("score-hit-target") && !notationToolbarButton;
-      if (notationToolbarButton && (event.key === " " || event.key === "Enter")) return;
-      const typing = textEntry || unrelatedButton;
-      if (event.isComposing || typing) return;
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") {
+      const notationToolbarControl = Boolean(target?.closest(".note-toolbar button, .mobile-input-dock button"));
+      const scoreControl = Boolean(target?.closest(".score-hit-target"));
+      const unrelatedInteractive = Boolean(target?.closest('a[href], button, summary, [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="checkbox"], [role="radio"], [role="switch"]'))
+        && !scoreControl
+        && !notationToolbarControl;
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z" && !textEntry) {
         event.preventDefault();
         if (event.shiftKey) redo(); else undo();
         return;
       }
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") { event.preventDefault(); saveNow(); return; }
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "p") { event.preventDefault(); window.print(); return; }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s" && !textEntry) { event.preventDefault(); saveNow(); return; }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "p" && !textEntry) {
+        event.preventDefault();
+        if (liveEngravingUnavailable) setStatus("Print unavailable while interactive engraving is paused — switch to a smaller part view first");
+        else window.print();
+        return;
+      }
+      if (notationToolbarControl && (event.key === " " || event.key === "Enter")) return;
+      const typing = textEntry || unrelatedInteractive;
+      if (event.isComposing || typing) return;
       if (event.key === " ") { event.preventDefault(); playScore(); return; }
       if (event.key === "Backspace" || event.key === "Delete") {
         event.preventDefault();
@@ -1068,11 +1285,19 @@ export function NotationStudio() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [activeDialogOpen, dotCount, enterEvent, exportOpen, mobileToolsOpen, openHelpDialog, playScore, redo, removeLatestInput, saveNow, toggleTie, undo]);
+  }, [activeDialogOpen, dotCount, enterEvent, exportOpen, liveEngravingUnavailable, mobileToolsOpen, openHelpDialog, playScore, redo, removeLatestInput, saveNow, toggleTie, undo]);
 
   useEffect(() => () => {
     if (playbackTimerRef.current) window.clearInterval(playbackTimerRef.current);
-    void audioContextRef.current?.close();
+    const context = audioContextRef.current;
+    audioContextRef.current = null;
+    if (context) {
+      try {
+        void context.close().catch(() => undefined);
+      } catch {
+        // Component teardown must remain total even if audio cleanup fails.
+      }
+    }
   }, []);
 
   const filteredInstruments = useMemo(() => {
@@ -1086,54 +1311,89 @@ export function NotationStudio() {
   const createFromTemplate = (templateId: string) => {
     const next = createScore(templateId, false);
     const selection = safeSelection(next);
+    const preserveUndo = !largeScoreEditingPaused;
     cancelPlayback();
+    scoreRef.current = next;
+    savePendingRef.current = true;
+    autoSaveEnabledRef.current = true;
     setScore(next);
     setSelectedEventTarget(null);
-    setPast([]);
+    setPast(preserveUndo ? trimStudioHistory([...past, { score, selection: selectedEventTarget }], "end") : []);
     setFuture([]);
     setSelectedPartId(selection.partId);
     setSelectedStaffId(selection.staffId);
     setChangeMeasureId(next.measureOrder[0]);
     setMetadataDraft(next.metadata);
+    setTitleError("");
     setAutoSaveEnabled(true);
     setViewMode("score");
     setNewOpen(false);
-    setStatus(`Created ${next.metadata.subtitle}`);
+    setStatus(preserveUndo
+      ? `Created ${next.metadata.subtitle} · Undo restores the previous score`
+      : `Created ${next.metadata.subtitle} · previous large score was released from Undo to keep the app responsive`);
   };
 
   const openImportedScore = (parsed: ScoreDocument, message: string) => {
+    importRequestIdRef.current += 1;
     filePickerReturnFocusRef.current = null;
     modalReturnFocusRef.current = null;
+    const previousScore = scoreRef.current;
+    const previousSelection = revalidateEventSelection(previousScore, selectedEventTargetRef.current);
+    const previousSelectionFallback = safeSelection(previousScore, previousSelection?.partId, previousSelection?.staffId);
+    const preserveUndo = planLiveEngraving(previousScore, "score", previousSelectionFallback.partId).kind === "safe";
     const selection = safeSelection(parsed);
     cancelPlayback();
+    scoreRef.current = parsed;
+    savePendingRef.current = true;
+    autoSaveEnabledRef.current = true;
     setScore(parsed);
     setSelectedEventTarget(null);
-    setPast([]);
+    selectedEventTargetRef.current = null;
+    setPast((items) => preserveUndo
+      ? trimStudioHistory([...items, { score: previousScore, selection: previousSelection }], "end")
+      : []);
     setFuture([]);
     setSelectedPartId(selection.partId);
     setSelectedStaffId(selection.staffId);
     setChangeMeasureId(parsed.measureOrder[0]);
     setMetadataDraft(parsed.metadata);
+    setTitleError("");
     setAutoSaveEnabled(true);
     setPendingImport(null);
-    setStatus(message);
+    setStatus(preserveUndo
+      ? `${message} · Undo restores the previous score`
+      : `${message} · previous large score was released from Undo to keep the app responsive`);
+    window.setTimeout(() => projectTitleRef.current?.focus(), 0);
   };
 
   const importScore = async (file: File | undefined) => {
+    const requestId = ++importRequestIdRef.current;
     const returnFocus = filePickerReturnFocusRef.current;
-    filePickerReturnFocusRef.current = null;
     if (!file) {
+      restoreFilePickerFocus();
       return;
     }
+    filePickerReturnFocusRef.current = null;
     try {
-      if (file.size > 10 * 1024 * 1024) throw new Error("This score is larger than the 10 MB safety limit.");
-      const contents = await file.text();
       const lowerName = file.name.toLowerCase();
       const isXml = lowerName.endsWith(".musicxml") || lowerName.endsWith(".xml") || file.type.includes("xml");
-      const imported = isXml ? (await import("../lib/music/importers")).importMusicXML(contents) : null;
+      const maximumBytes = isXml ? MAX_MUSICXML_FILE_BYTES : MAX_NATIVE_FILE_BYTES;
+      if (file.size > maximumBytes) {
+        throw new Error(`This ${isXml ? "MusicXML" : "Garak JSON"} file is larger than the ${maximumBytes / 1024 / 1024} MB safety limit.`);
+      }
+      const contents = await file.text();
+      if (requestId !== importRequestIdRef.current) return;
+      let imported: ReturnType<typeof import("../lib/music/importers").importMusicXML> | null = null;
+      if (isXml) {
+        const { importMusicXML } = await import("../lib/music/importers");
+        if (requestId !== importRequestIdRef.current) return;
+        imported = importMusicXML(contents);
+      }
       const parsed = imported?.score ?? JSON.parse(contents) as ScoreDocument;
       const errors = validateScore(parsed);
       if (errors.length) throw new Error(errors[0]);
+      serializeNativeScore(parsed);
+      if (requestId !== importRequestIdRef.current) return;
       if (imported?.warnings.length) {
         modalReturnFocusRef.current = returnFocus;
         setPendingImport({ score: parsed, warnings: imported.warnings });
@@ -1142,40 +1402,75 @@ export function NotationStudio() {
       }
       openImportedScore(parsed, imported ? `Opened ${parsed.metadata.title} from MusicXML` : `Opened ${parsed.metadata.title}`);
     } catch (error) {
+      if (requestId !== importRequestIdRef.current) return;
       filePickerReturnFocusRef.current = null;
       modalReturnFocusRef.current = null;
       setPendingImport(null);
-      setStatus(error instanceof Error ? error.message : "The score file could not be opened.");
+      setStatus(error instanceof Error ? `The score file could not be opened. ${error.message}` : "The score file could not be opened.");
+      window.setTimeout(() => {
+        const focusTarget = returnFocus?.isConnected && returnFocus.getClientRects().length
+          ? returnFocus
+          : projectTitleRef.current;
+        focusTarget?.focus();
+      }, 0);
     }
   };
 
+  const ensureExportable = (format: string): boolean => {
+    const errors = validateScore(score);
+    if (!errors.length) return true;
+    closeExportMenuAndRestoreFocus();
+    setStatus(`${format} export unavailable — ${errors[0]}`);
+    return false;
+  };
+
   const exportNative = () => {
-    downloadBlob(JSON.stringify(score, null, 2), "application/json", `${safeFilename(score.metadata.title)}.garak.json`);
-    setExportOpen(false);
-    setStatus("Exported a native Garak score");
+    if (!ensureExportable("Garak JSON")) return;
+    try {
+      downloadBlob(serializeNativeScore(score), "application/json", `${safeFilename(score.metadata.title)}.garak.json`);
+      setStatus("Exported a native Garak score");
+    } catch (error) {
+      setStatus(`Garak JSON export failed — ${error instanceof Error ? error.message : "the download could not be created"}`);
+    }
+    closeExportMenuAndRestoreFocus();
   };
 
   const exportMusicXML = () => {
+    if (!ensureExportable("MusicXML")) return;
     try {
       downloadBlob(scoreToMusicXML(score), "application/vnd.recordare.musicxml+xml", `${safeFilename(score.metadata.title)}.musicxml`);
       setStatus("Exported MusicXML 4.0");
-    } catch (error) { setStatus(error instanceof Error ? error.message : "MusicXML export failed."); }
-    setExportOpen(false);
+    } catch (error) { setStatus(`MusicXML export failed — ${error instanceof Error ? error.message : "the download could not be created"}`); }
+    closeExportMenuAndRestoreFocus();
   };
 
   const exportMidi = () => {
+    if (!ensureExportable("MIDI")) return;
     try {
       const midi = scoreToMidi(score);
       const midiBuffer = midi.buffer.slice(midi.byteOffset, midi.byteOffset + midi.byteLength) as ArrayBuffer;
       downloadBlob(midiBuffer, "audio/midi", `${safeFilename(score.metadata.title)}.mid`);
       setStatus("Exported a Standard MIDI File");
-    } catch (error) { setStatus(error instanceof Error ? error.message : "MIDI export failed."); }
-    setExportOpen(false);
+    } catch (error) { setStatus(`MIDI export failed — ${error instanceof Error ? error.message : "the download could not be created"}`); }
+    closeExportMenuAndRestoreFocus();
   };
 
   const applyMetadata = () => {
-    if (!metadataDraft.title.trim()) { setStatus("A score title is required"); return; }
-    if (JSON.stringify(metadataDraft) === JSON.stringify(score.metadata)) return;
+    if (guardLargeScoreEditing()) {
+      setMetadataDraft(score.metadata);
+      return;
+    }
+    if (!metadataDraft.title.trim()) {
+      setTitleError("Enter a score title before saving these details.");
+      setStatus("Score title invalid — a score title is required");
+      return;
+    }
+    const recoveredFromTitleError = Boolean(titleError);
+    setTitleError("");
+    if (JSON.stringify(metadataDraft) === JSON.stringify(score.metadata)) {
+      if (recoveredFromTitleError) setStatus("Score title restored · no details changed");
+      return;
+    }
     const next = structuredClone(score);
     next.metadata = metadataDraft;
     next.updatedAt = new Date().toISOString();
@@ -1183,6 +1478,7 @@ export function NotationStudio() {
   };
 
   const setTempo = (tempo: number) => {
+    if (guardLargeScoreEditing()) return;
     const safeTempo = Math.max(30, Math.min(300, Math.round(tempo || 96)));
     if (safeTempo === score.tempo) return;
     const next = structuredClone(score);
@@ -1192,6 +1488,7 @@ export function NotationStudio() {
   };
 
   const changeMeterFromMeasure = (value: string) => {
+    if (guardLargeScoreEditing()) return;
     const [numerator, denominator] = value.split("/").map(Number);
     const result = setTimeFromMeasure(score, activeChangeMeasureId, { numerator, denominator });
     if (result.error) {
@@ -1206,6 +1503,7 @@ export function NotationStudio() {
   };
 
   const changeKeyFromMeasure = (value: string) => {
+    if (guardLargeScoreEditing()) return;
     const option = KEY_SIGNATURES.find((candidate) => keyValue(candidate) === value);
     if (!option) {
       setStatus("Choose a supported major or minor key signature.");
@@ -1225,12 +1523,18 @@ export function NotationStudio() {
   };
 
   const addEmptyMeasure = () => {
+    if (guardLargeScoreEditing()) return;
     const next = appendMeasure(score);
+    if (next === score) {
+      setStatus("Measure not added — the score reached its safety limit");
+      return;
+    }
     const measure = next.measures[next.measureOrder.at(-1)!];
     commit(next, `Added measure ${measure.number}`);
   };
 
   const removeEmptyMeasure = () => {
+    if (guardLargeScoreEditing()) return;
     const result = removeLastMeasure(score);
     if (!result.removed) {
       setStatus(result.error);
@@ -1251,6 +1555,7 @@ export function NotationStudio() {
           ref={projectTitleRef}
           className="project-title"
           onClick={() => {
+            setExportOpen(false);
             if (window.matchMedia("(max-width: 1180px)").matches) {
               setInstrumentsOpen(false);
               setInspectorOpen(true);
@@ -1267,32 +1572,33 @@ export function NotationStudio() {
         <div className="transport">
           <button className="icon-button" onClick={undo} disabled={!past.length} aria-label="Undo"><Undo2 size={16} /></button>
           <button className="icon-button" onClick={redo} disabled={!future.length} aria-label="Redo"><Redo2 size={16} /></button>
-          <button className={`play-button ${playing ? "playing" : ""}`} onClick={playScore} aria-label={playing ? "Stop playback" : "Play score"}>{playing ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}</button>
+          <button className={`play-button ${playing ? "playing" : ""}`} onClick={playScore} disabled={!playing && liveEngravingUnavailable} aria-label={playing ? "Stop playback" : liveEngravingUnavailable ? "Playback unavailable while engraving is paused" : "Play score"}>{playing ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}</button>
           {playing && playbackPosition ? <span className="playback-position">m. {playbackPosition.measureNumber} · beat {playbackPosition.beat}</span> : null}
         </div>
         <div className="header-actions">
-          <button className="icon-button mobile-instruments-button" onClick={() => { setInspectorOpen(false); setInstrumentsOpen(true); }} aria-label="Open instruments" aria-controls="instrument-drawer" aria-expanded={instrumentsOpen}><Music2 size={16} /></button>
+          <button ref={mobileInstrumentsButtonRef} className="icon-button mobile-instruments-button" onClick={() => { setExportOpen(false); setInspectorOpen(false); setInstrumentsOpen(true); }} aria-label="Open instruments" aria-controls="instrument-drawer" aria-expanded={instrumentsOpen}><Music2 size={16} /></button>
           <button className="quiet-button header-new-button" onClick={openNewDialog} aria-label="New score"><Plus size={14} /><span className="action-label">New</span></button>
           <button ref={openFileButtonRef} className="icon-button header-open-button" onClick={() => openFilePicker(openFileButtonRef.current)} aria-label="Open Garak or MusicXML score"><FolderOpen size={16} /></button>
           <button className="icon-button header-save-button" onClick={saveNow} aria-label="Save now"><Save size={16} /></button>
           <button className="icon-button header-help-button" onClick={openHelpDialog} aria-label="Keyboard shortcuts"><Keyboard size={16} /></button>
-          <div className="export-anchor">
+          <div ref={exportAnchorRef} className="export-anchor" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setExportOpen(false); }}>
             <button ref={exportButtonRef} className="primary-button" onClick={() => { setMobileToolsOpen(false); setExportOpen((value) => !value); }} aria-label="File and export menu" aria-expanded={exportOpen}><Download size={14} /><span className="action-label">Export</span><ChevronDown className="export-chevron" size={13} /></button>
             {exportOpen ? (
               <div className="export-menu" role="group" aria-label="File and export options">
                 <button className="mobile-file-action" onClick={openNewDialog}><Plus size={16} /><span><strong>New score</strong><small>Start from a template</small></span></button>
                 <button className="mobile-file-action" onClick={() => openFilePicker(exportButtonRef.current)}><FolderOpen size={16} /><span><strong>Open score</strong><small>Garak JSON or MusicXML</small></span></button>
-                <button className="mobile-file-action" onClick={() => { setExportOpen(false); saveNow(); }}><Save size={16} /><span><strong>Save now</strong><small>Keep a local snapshot</small></span></button>
+                <button className="mobile-file-action" onClick={() => { closeExportMenuAndRestoreFocus(); saveNow(); }}><Save size={16} /><span><strong>Save now</strong><small>Keep a local snapshot</small></span></button>
                 <button className="mobile-file-action" onClick={openHelpDialog}><Keyboard size={16} /><span><strong>Help & shortcuts</strong><small>Input reference</small></span></button>
                 <button onClick={exportMusicXML}><FileMusic size={16} /><span><strong>MusicXML</strong><small>Open in notation apps</small></span></button>
                 <button onClick={exportMidi}><FileDown size={16} /><span><strong>MIDI</strong><small>Performance data</small></span></button>
                 <button onClick={exportNative}><FileJson size={16} /><span><strong>Garak JSON</strong><small>Editable native snapshot</small></span></button>
-                <button onClick={() => { setExportOpen(false); window.print(); }}><Printer size={16} /><span><strong>Print / PDF</strong><small>Clean score pages</small></span></button>
+                <button disabled={liveEngravingUnavailable} onClick={() => { closeExportMenuAndRestoreFocus(); window.print(); }}><Printer size={16} /><span><strong>Print / PDF</strong><small>{liveEngravingUnavailable ? "Unavailable while engraving is paused" : viewMode === "part" ? "Current part layout" : "Full score layout"}</small></span></button>
+                <Link className="licenses-menu-link" href="/licenses" target="_blank" rel="noopener noreferrer" onClick={closeExportMenuAndRestoreFocus} aria-label="About and third-party licenses (opens in a new tab)"><CircleHelp size={16} /><span><strong>About & licenses</strong><small>Credits and license texts</small></span></Link>
               </div>
             ) : null}
           </div>
         </div>
-        <input ref={fileInputRef} className="visually-hidden" type="file" tabIndex={-1} aria-hidden="true" accept=".json,.garak,.musicxml,.xml,application/vnd.recordare.musicxml+xml,application/xml,text/xml" onChange={(event) => { void importScore(event.target.files?.[0]); event.currentTarget.value = ""; }} />
+        <input ref={fileInputRef} hidden type="file" accept=".json,.garak,.musicxml,.xml,application/vnd.recordare.musicxml+xml,application/xml,text/xml" onChange={(event) => { void importScore(event.target.files?.[0]); event.currentTarget.value = ""; }} />
       </header>
 
       <section ref={notationToolsRef} id="notation-tools" className={`note-toolbar ${mobileToolsOpen ? "mobile-tools-open" : ""}`} aria-label="Notation tools">
@@ -1307,9 +1613,11 @@ export function NotationStudio() {
             onClick={() => {
               const next = !chordMode;
               setChordMode(next);
-              setStatus(next ? "Chord mode on — A–G adds to the last note" : "Chord mode off — A–G enters new notes");
+              setStatus(next
+                ? selectedEvent?.kind === "note" ? "Chord mode on — A–G adds to the selected note" : lastEvent?.kind === "note" ? "Chord mode on — A–G adds to the latest note" : "Chord mode on — A–G starts a new chord"
+                : "Chord mode off — A–G enters new notes");
             }}
-            aria-label="Chord mode. Add A through G to the last note event"
+            aria-label={`Chord mode. ${selectedEvent?.kind === "note" ? "Add A through G to the selected note event" : lastEvent?.kind === "note" ? "Add A through G to the latest note event" : "Start a chord with A through G"}`}
             aria-pressed={chordMode}
           >Chord</button>
         </div>
@@ -1317,15 +1625,15 @@ export function NotationStudio() {
           {(["C", "D", "E", "F", "G", "A", "B"] as PitchStep[]).map((step) => {
             const previewAlter = inputAlter(accidentalMode, previewWrittenKey, step);
             const suffix = previewAlter === 0 && accidentalMode === "auto" ? "" : accidentalGlyph(previewAlter);
-            const action = canAddChordTone ? "Add to the last note chord" : chordMode ? "Start a chord with" : "Enter";
-            return <button key={step} onClick={() => enterEvent(step)} aria-label={`${action} ${step}${suffix}${octave}, ${accidentalMode} accidental mode`}><span>{step}{suffix}{octave}</span><kbd>{step}</kbd></button>;
+            const action = canAddChordTone ? `Add to the ${chordActionTarget}` : chordMode ? "Start a chord with" : "Enter";
+            return <button key={step} disabled={largeScoreEditingPaused} onClick={() => enterEvent(step)} aria-label={`${action} ${step}${suffix}${octave}, ${accidentalMode} accidental mode`}><span>{step}{suffix}{octave}</span><kbd>{step}</kbd></button>;
           })}
-          <button className="rest-key" onClick={() => enterEvent("C", true)} aria-label={chordMode ? "Enter a rest; chord mode is ignored for rests" : "Enter a rest"}><span>Rest</span><kbd>R</kbd></button>
+          <button className="rest-key" disabled={largeScoreEditingPaused} onClick={() => enterEvent("C", true)} aria-label={chordMode ? "Enter a rest; chord mode is ignored for rests" : "Enter a rest"}><span>Rest</span><kbd>R</kbd></button>
         </div>
         <div className="tool-group quick-edit-group" role="group" aria-label="Edit input">
           <button className="edit-tool-button" onClick={undo} disabled={!past.length} aria-label="Undo last edit"><Undo2 size={16} /><span>Undo</span></button>
           <button className="edit-tool-button" onClick={redo} disabled={!future.length} aria-label="Redo edit"><Redo2 size={16} /><span>Redo</span></button>
-          <button className="edit-tool-button delete-input-button" onClick={() => removeLatestInput()} disabled={!deletionTargetEvent} aria-label={deleteActionLabel}><Trash2 size={16} /><span>Delete</span></button>
+          <button className="edit-tool-button delete-input-button" onClick={() => removeLatestInput()} disabled={largeScoreEditingPaused || !deletionTargetEvent} aria-label={deleteActionLabel}><Trash2 size={16} /><span>Delete</span></button>
         </div>
         <div className="tool-group note-values">
           {DURATION_CHOICES.map((choice) => (
@@ -1360,7 +1668,7 @@ export function NotationStudio() {
             aria-label={dotCycleAriaLabel(dotCount)}
             aria-pressed={dotCount > 0}
           >{dotCount === 2 ? "··" : "·"}<kbd>.</kbd></button>
-          <button className="tool-button tie-tool" onClick={toggleTie} aria-label="Tie the last two matching notes">⌒<kbd>T</kbd></button>
+          <button className="tool-button tie-tool" disabled={largeScoreEditingPaused} onClick={toggleTie} aria-label="Tie the last two matching notes">⌒<kbd>T</kbd></button>
         </div>
         <div className="octave-control"><button onClick={() => setOctave(Math.max(0, octave - 1))} aria-label="Lower octave">−</button><span><small>OCTAVE</small>{octave}</span><button onClick={() => setOctave(Math.min(8, octave + 1))} aria-label="Raise octave">＋</button></div>
         <div className="toolbar-spacer" />
@@ -1373,19 +1681,19 @@ export function NotationStudio() {
             <span><strong>{inputTargetLabel}</strong><small>{durationName(duration, dotCount)} · Oct {octave} · {chordMode ? "Chord" : "Note"}</small></span>
             <ChevronDown className={mobileToolsOpen ? "open" : ""} size={15} aria-hidden="true" />
           </button>
-          <button className="mobile-rest-meta" onClick={() => enterEvent("C", true)} aria-label="Enter a rest">Rest</button>
+          <button className="mobile-rest-meta" disabled={largeScoreEditingPaused} onClick={() => enterEvent("C", true)} aria-label="Enter a rest">Rest</button>
           <button onClick={undo} disabled={!past.length} aria-label="Undo last edit"><Undo2 size={18} /></button>
           <button onClick={redo} disabled={!future.length} aria-label="Redo edit"><Redo2 size={18} /></button>
-          <button className="mobile-delete-button" onClick={() => removeLatestInput()} disabled={!deletionTargetEvent} aria-label={deleteActionLabel}><Trash2 size={18} /></button>
+          <button className="mobile-delete-button" onClick={() => removeLatestInput()} disabled={largeScoreEditingPaused || !deletionTargetEvent} aria-label={deleteActionLabel}><Trash2 size={18} /></button>
         </div>
         <div className="mobile-pitch-keys" role="group" aria-label="Enter pitch or rest">
           {(["C", "D", "E", "F", "G", "A", "B"] as PitchStep[]).map((step) => {
             const previewAlter = inputAlter(accidentalMode, previewWrittenKey, step);
             const suffix = previewAlter === 0 && accidentalMode === "auto" ? "" : accidentalGlyph(previewAlter);
-            const action = canAddChordTone ? "Add to the last note chord" : chordMode ? "Start a chord with" : "Enter";
-            return <button key={step} onClick={() => enterEvent(step)} aria-label={`${action} ${step}${suffix}${octave}`}><span>{step}{suffix}</span><small>{octave}</small></button>;
+            const action = canAddChordTone ? `Add to the ${chordActionTarget}` : chordMode ? "Start a chord with" : "Enter";
+            return <button key={step} disabled={largeScoreEditingPaused} onClick={() => enterEvent(step)} aria-label={`${action} ${step}${suffix}${octave}`}><span>{step}{suffix}</span><small>{octave}</small></button>;
           })}
-          <button className="mobile-rest-key" onClick={() => enterEvent("C", true)} aria-label="Enter a rest">Rest</button>
+          <button className="mobile-rest-key" disabled={largeScoreEditingPaused} onClick={() => enterEvent("C", true)} aria-label="Enter a rest">Rest</button>
         </div>
       </section>
 
@@ -1399,7 +1707,7 @@ export function NotationStudio() {
           aria-modal={instrumentsOpen ? "true" : undefined}
           aria-labelledby="instrument-panel-title"
         >
-          <div className="panel-heading"><div><span className="eyebrow">{countLabel(score.parts.length, "PART", "PARTS")}</span><h2 id="instrument-panel-title">Instruments</h2></div><span className="panel-heading-actions"><button className="round-button" onClick={() => { setInstrumentsOpen(false); setAddOpen(true); }} aria-label="Add instrument"><Plus size={15} /></button><button className="icon-button drawer-close" onClick={() => setInstrumentsOpen(false)} aria-label="Close instruments"><X size={17} /></button></span></div>
+          <div className="panel-heading"><div><span className="eyebrow">{countLabel(score.parts.length, "PART", "PARTS")}</span><h2 id="instrument-panel-title">Instruments</h2></div><span className="panel-heading-actions"><button className="round-button" disabled={largeScoreEditingPaused} onClick={openInstrumentDialog} aria-label="Add instrument"><Plus size={15} /></button><button className="icon-button drawer-close" onClick={() => setInstrumentsOpen(false)} aria-label="Close instruments"><X size={17} /></button></span></div>
           <div className="instrument-list">
             {score.parts.map((part, index) => (
               <button className={`instrument-row ${part.id === selectedPartId ? "selected" : ""}`} key={part.id} onClick={() => { selectPart(part.id); if (instrumentsOpen) setInstrumentsOpen(false); }} aria-pressed={part.id === selectedPartId}>
@@ -1410,7 +1718,7 @@ export function NotationStudio() {
               </button>
             ))}
           </div>
-          <button className="add-staff-button" onClick={() => { setInstrumentsOpen(false); setAddOpen(true); }}><Plus size={13} /> Add instrument</button>
+          <button className="add-staff-button" disabled={largeScoreEditingPaused} onClick={openInstrumentDialog}><Plus size={13} /> Add instrument</button>
           <div className="panel-footer"><button className={`view-tab ${viewMode === "score" ? "active" : ""}`} onClick={() => setViewMode("score")} aria-pressed={viewMode === "score"}><Music2 size={14} /> Score</button><button className={`view-tab ${viewMode === "part" ? "active" : ""}`} onClick={() => setViewMode("part")} aria-pressed={viewMode === "part"}><FileMusic size={14} /> Part</button></div>
         </aside>
 
@@ -1418,9 +1726,10 @@ export function NotationStudio() {
           <div className="canvas-controls">
             <span>{viewMode === "score" ? `${score.parts.length}-part score` : selectedPart?.name}</span><span className="separator">•</span><span>{countLabel(score.measureOrder.length, "measure")}</span><span className="separator">•</span><span>{countLabel(totalEvents, selectedPart && selectedPart.staves.length > 1 ? "staff event" : "event")}</span>
             <span className="tool-section" role="group" aria-label="Measure controls">
-              <button className="mode-pill" onClick={addEmptyMeasure} aria-label="Add empty measure"><Plus size={11} aria-hidden="true" /> Measure</button>
-              <button className="mode-pill" onClick={removeEmptyMeasure} aria-label="Remove last empty measure"><Trash2 size={11} aria-hidden="true" /> Remove empty measure</button>
+              <button className="mode-pill" disabled={largeScoreEditingPaused} onClick={addEmptyMeasure} aria-label="Add empty measure"><Plus size={11} aria-hidden="true" /> Measure</button>
+              <button className="mode-pill" disabled={largeScoreEditingPaused} onClick={removeEmptyMeasure} aria-label="Remove last empty measure"><Trash2 size={11} aria-hidden="true" /> Remove empty measure</button>
             </span>
+            {largeScoreEditingPaused ? <span className="large-score-editing-notice" role="status">Large score · editing paused for responsiveness · save and export remain available</span> : null}
             {selectedEvent && selectedEventTarget ? <span className="selected-event-summary">Selected · m. {score.measures[selectedEventTarget.measureId].number} · {eventName(selectedEvent)} · {deleteRemovesChordTone ? "Delete removes its last tone" : selectedEvent.kind === "note" ? "Delete clears to rest · rhythm kept" : "Delete removes time"}</span> : null}
             <span className="canvas-hint"><kbd>A–G</kbd> pitch <kbd>R</kbd> rest <kbd>⌫</kbd> delete <kbd>Space</kbd> play</span>
           </div>
@@ -1441,7 +1750,7 @@ export function NotationStudio() {
               onSelectPart={selectPart}
               onSelectStaff={selectStaff}
             />
-            <span className="page-number">1</span>
+            <span className="page-number" aria-hidden="true">1</span>
           </article>
         </section>
 
@@ -1461,14 +1770,14 @@ export function NotationStudio() {
               <span>
                 <strong>{inspectorEvent?.kind === "note" ? inspectorEvent.notes.length > 1 ? `Chord · ${inspectorEvent.notes.length} notes` : pitchName(inspectorEvent.notes[0].pitch) : inspectorEvent?.kind === "rest" ? "Rest" : selectedPart.name}</strong>
                 <small>{selectedPart.name}{selectedPart.staves.length > 1 ? ` · Staff ${selectedStaffIndex + 1}` : ""} · {durationName(inspectorEvent?.duration.base ?? duration, inspectorEvent?.duration.dots ?? dotCount)}</small>
-                {inspectorEvent?.kind === "note" && inspectorEvent.id === lastEvent?.id ? (
+                {inspectorEvent ? (
                   <button
                     type="button"
                     className="danger-link"
-                    onClick={removeChordTone}
-                    aria-label="Remove last chord tone"
-                    disabled={inspectorEvent.notes.length <= 1}
-                  ><Trash2 size={13} aria-hidden="true" /> Remove last chord tone</button>
+                    onClick={() => removeLatestInput()}
+                    disabled={largeScoreEditingPaused}
+                    aria-label={deleteActionLabel}
+                  ><Trash2 size={13} aria-hidden="true" /> {inspectorDeleteText}</button>
                 ) : null}
               </span>
             </div>
@@ -1478,7 +1787,7 @@ export function NotationStudio() {
             <label>Dynamic<select
               aria-label={`Dynamic on ${inspectorUsesSelection ? "selected" : "last"} event`}
               value={inspectorEvent?.dynamic ?? "none"}
-              disabled={!inspectorEvent}
+              disabled={largeScoreEditingPaused || !inspectorEvent}
               onChange={(event) => applyDynamic(event.target.value === "none" ? null : event.target.value as DynamicMarking)}
             >
               <option value="none">None</option>
@@ -1488,7 +1797,7 @@ export function NotationStudio() {
             <label>Articulation<select
               aria-label={`Articulation on ${inspectorUsesSelection ? "selected" : "last"} note event`}
               value={inspectorNoteEvent?.articulation ?? "none"}
-              disabled={!inspectorNoteEvent}
+              disabled={largeScoreEditingPaused || !inspectorNoteEvent}
               onChange={(event) => applyArticulation(event.target.value === "none" ? null : event.target.value as Articulation)}
             >
               <option value="none">None</option>
@@ -1500,21 +1809,38 @@ export function NotationStudio() {
           </div>
           <div className="inspector-section">
             <div className="section-title"><span>Score</span></div>
-            <label>Title<input id="score-title" maxLength={200} value={metadataDraft.title} onChange={(event) => setMetadataDraft({ ...metadataDraft, title: event.target.value })} onBlur={applyMetadata} /></label>
-            <label>Composer<input maxLength={200} value={metadataDraft.composer} onChange={(event) => setMetadataDraft({ ...metadataDraft, composer: event.target.value })} onBlur={applyMetadata} /></label>
-            <label>Tempo<span className="input-suffix"><input type="number" min="30" max="300" step="1" defaultValue={score.tempo} key={score.tempo} onBlur={(event) => setTempo(Number(event.target.value))} /><small>BPM</small></span></label>
+            <label>Title<input
+              id="score-title"
+              maxLength={200}
+              disabled={largeScoreEditingPaused}
+              value={metadataDraft.title}
+              aria-invalid={Boolean(titleError)}
+              aria-describedby={titleError ? "score-title-error" : undefined}
+              onChange={(event) => {
+                const title = event.target.value;
+                setMetadataDraft({ ...metadataDraft, title });
+                if (title.trim()) {
+                  if (titleError) setStatus("Score title restored");
+                  setTitleError("");
+                }
+              }}
+              onBlur={applyMetadata}
+            /></label>
+            {titleError ? <p id="score-title-error" className="field-error">{titleError}</p> : null}
+            <label>Composer<input maxLength={200} disabled={largeScoreEditingPaused} value={metadataDraft.composer} onChange={(event) => setMetadataDraft({ ...metadataDraft, composer: event.target.value })} onBlur={applyMetadata} /></label>
+            <label>Tempo<span className="input-suffix"><input type="number" min="30" max="300" step="1" disabled={largeScoreEditingPaused} defaultValue={score.tempo} key={score.tempo} onBlur={(event) => setTempo(Number(event.target.value))} /><small>BPM</small></span></label>
             <label>Change from<select aria-label="Change key and meter from measure" aria-describedby="measure-change-scope" value={activeChangeMeasureId} onChange={(event) => {
               setChangeMeasureId(event.target.value);
               setStatus(`Key and meter controls now target measure ${score.measures[event.target.value].number}`);
             }}>
               {score.measureOrder.map((measureId) => <option data-measure-change-option key={measureId} value={measureId}>Measure {score.measures[measureId].number}</option>)}
             </select></label>
-            <p id="measure-change-scope" style={{ fontSize: 8, lineHeight: 1.45, color: "#777168", margin: "4px 0 7px" }}>Applies from the selected measure until the next existing change.</p>
-            <label>Meter from here<select aria-label="Time signature from selected measure" value={changeMeterValue} onChange={(event) => changeMeterFromMeasure(event.target.value)}>
+            <p id="measure-change-scope" style={{ fontSize: 10, lineHeight: 1.45, color: "#777168", margin: "4px 0 7px" }}>Applies from the selected measure until the next existing change.</p>
+            <label>Meter from here<select aria-label="Time signature from selected measure" disabled={largeScoreEditingPaused} value={changeMeterValue} onChange={(event) => changeMeterFromMeasure(event.target.value)}>
               {!changeMeterIsPreset ? <option value={changeMeterValue}>{changeMeterValue} · imported/custom</option> : null}
               {METER_PRESETS.map((meter) => <option key={meter} value={meter}>{meter}</option>)}
             </select></label>
-            <label>Concert key from here<select aria-label="Concert key signature" value={keyValue(selectedConcertKey)} onChange={(event) => changeKeyFromMeasure(event.target.value)}>
+            <label>Concert key from here<select aria-label="Concert key signature" disabled={largeScoreEditingPaused} value={keyValue(selectedConcertKey)} onChange={(event) => changeKeyFromMeasure(event.target.value)}>
               {(["major", "minor"] as const).map((mode) => <optgroup key={mode} label={mode === "major" ? "Major keys" : "Minor keys"}>
                 {KEY_SIGNATURES.filter((key) => key.mode === mode).map((key) => <option data-key-signature-option key={keyValue(key)} value={keyValue(key)}>{key.label}</option>)}
               </optgroup>)}
@@ -1540,8 +1866,8 @@ export function NotationStudio() {
               <label>Clef<output aria-label={`Selected staff clef: ${selectedStaff?.clef ?? selectedPart.instrument.clef}`}>{selectedStaff?.clef ?? selectedPart.instrument.clef}</output></label>
               <label>Written key<output aria-label={`${selectedPart.name} written key`}>{keySignatureName(selectedWrittenKey)}</output></label>
               <label>Written C sounds<output>{selectedPart.instrument.transposition.chromatic + selectedPart.instrument.transposition.octaveChange * 12 > 0 ? "+" : ""}{selectedPart.instrument.transposition.chromatic + selectedPart.instrument.transposition.octaveChange * 12} st</output></label>
-              <div className="mixer-buttons"><button className={selectedPart.muted ? "active" : ""} onClick={() => commit(updatePart(score, selectedPart.id, { muted: !selectedPart.muted }), selectedPart.muted ? "Unmuted part" : "Muted part")} aria-pressed={selectedPart.muted}><Volume2 size={13} /> Mute</button><button className={selectedPart.solo ? "active" : ""} onClick={() => commit(updatePart(score, selectedPart.id, { solo: !selectedPart.solo }), selectedPart.solo ? "Unsoloed part" : "Soloed part")} aria-pressed={selectedPart.solo}>S Solo</button></div>
-              <button className="danger-link" onClick={() => { const next = removeInstrument(score, selectedPart.id); const selection = safeSelection(next); setSelectedEventTarget(null); setSelectedPartId(selection.partId); setSelectedStaffId(selection.staffId); commit(next, `Removed ${selectedPart.name}`); }} disabled={score.parts.length <= 1}><Trash2 size={13} /> Remove part</button>
+              <div className="mixer-buttons"><button className={selectedPart.muted ? "active" : ""} disabled={largeScoreEditingPaused} onClick={() => commit(updatePart(score, selectedPart.id, { muted: !selectedPart.muted }), selectedPart.muted ? "Unmuted part" : "Muted part")} aria-pressed={selectedPart.muted}><Volume2 size={13} /> Mute</button><button className={selectedPart.solo ? "active" : ""} disabled={largeScoreEditingPaused} onClick={() => commit(updatePart(score, selectedPart.id, { solo: !selectedPart.solo }), selectedPart.solo ? "Unsoloed part" : "Soloed part")} aria-pressed={selectedPart.solo}>S Solo</button></div>
+              <button className="danger-link" onClick={() => { if (guardLargeScoreEditing()) return; const next = removeInstrument(score, selectedPart.id); const selection = safeSelection(next); setSelectedEventTarget(null); setSelectedPartId(selection.partId); setSelectedStaffId(selection.staffId); commit(next, `Removed ${selectedPart.name}`); }} disabled={largeScoreEditingPaused || score.parts.length <= 1}><Trash2 size={13} /> Remove part</button>
             </div>
           ) : null}
           <div className="shortcut-card"><span>QUICK INPUT</span><p><kbd>1–7</kbd> duration <kbd>.</kbd> 0–2 dots</p><p><kbd>A–G</kbd> pitch <kbd>R</kbd> rest</p><p><kbd>← →</kbd> select event <kbd>⌫</kbd> delete</p><p><kbd>↑ ↓</kbd> octave <kbd>Space</kbd> play</p><button onClick={openHelpDialog}>View all shortcuts <ChevronDown size={12} /></button></div>
@@ -1552,8 +1878,8 @@ export function NotationStudio() {
 
       {newOpen ? (
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setNewOpen(false); }}>
-          <section ref={activeDialogRef} tabIndex={-1} className="modal template-modal" role="dialog" aria-modal="true" aria-labelledby="new-score-title"><header><div><span className="eyebrow">START A SCORE</span><h2 id="new-score-title">Choose an ensemble</h2><p>You can add and remove instruments after creating the score.</p></div><button className="icon-button" onClick={() => setNewOpen(false)} aria-label="Close"><X size={18} /></button></header>
-            <div className="template-grid">{SCORE_TEMPLATES.map((template, index) => <button key={template.id} onClick={() => createFromTemplate(template.id)}><span className="template-number">0{index + 1}</span><Music2 size={22} /><strong>{template.name}</strong><small>{template.description}</small><em>{template.instruments.length} {template.instruments.length === 1 ? "part" : "parts"}</em></button>)}</div>
+          <section ref={activeDialogRef} tabIndex={-1} className="modal template-modal" role="dialog" aria-modal="true" aria-labelledby="new-score-title"><header><div><span className="eyebrow">START A SCORE</span><h2 id="new-score-title">Choose an ensemble</h2><p>{largeScoreEditingPaused ? "This large score cannot be kept in Undo without freezing the editor. Export it before choosing a template." : "You can add and remove instruments after creating the score."}</p></div><button className="icon-button" onClick={() => setNewOpen(false)} aria-label="Close"><X size={18} /></button></header>
+            <div className="template-grid">{SCORE_TEMPLATES.map((template, index) => <button key={template.id} onClick={() => createFromTemplate(template.id)}><span className="template-number" aria-hidden="true">0{index + 1}</span><Music2 size={22} /><strong>{template.name}</strong><small>{template.description}</small><em>{template.instruments.length} {template.instruments.length === 1 ? "part" : "parts"}</em></button>)}</div>
           </section>
         </div>
       ) : null}
@@ -1563,7 +1889,24 @@ export function NotationStudio() {
           <section ref={activeDialogRef} tabIndex={-1} className="modal instrument-modal" role="dialog" aria-modal="true" aria-labelledby="add-instrument-title"><header><div><span className="eyebrow">ORCHESTRA LIBRARY</span><h2 id="add-instrument-title">Add an instrument</h2><p>{INSTRUMENTS.length} standard orchestral, keyboard, and vocal definitions.</p></div><button className="icon-button" onClick={() => setAddOpen(false)} aria-label="Close"><X size={18} /></button></header>
             <div className="instrument-search"><Search size={16} /><input value={instrumentQuery} onChange={(event) => setInstrumentQuery(event.target.value)} placeholder="Search flute, B♭ clarinet, violin…" aria-label="Search instruments" /></div>
             <div className="family-tabs" role="group" aria-label="Instrument family filter">{["All", "Woodwinds", "Brass", "Percussion", "Keyboards", "Voices", "Strings"].map((family) => <button key={family} className={activeFamily === family ? "active" : ""} onClick={() => setActiveFamily(family)} aria-pressed={activeFamily === family}>{family}</button>)}</div>
-            <div className="catalog-list">{filteredInstruments.map((instrument) => <button key={instrument.catalogId} onClick={() => { const next = addInstrument(score, instrument.catalogId); const selection = safeSelection(next, next.parts.at(-1)?.id); commit(next, `Added ${instrument.name}`); setSelectedEventTarget(null); setSelectedPartId(selection.partId); setSelectedStaffId(selection.staffId); setAddOpen(false); }}><span className="catalog-color" style={{ background: instrument.color }} /><span><strong>{instrument.name}</strong><small>{instrument.family} · {instrument.staffClefs?.join(" + ") ?? instrument.clef} {instrument.staffClefs ? "staves" : "clef"}{instrument.transposition.chromatic || instrument.transposition.octaveChange ? ` · ${instrument.transposition.chromatic + instrument.transposition.octaveChange * 12} semitones` : ""}</small></span><Plus size={15} /></button>)}</div>
+            <p className="catalog-results" role="status" aria-live="polite" aria-atomic="true">{countLabel(filteredInstruments.length, "matching instrument")}</p>
+            <div className="catalog-list">{filteredInstruments.length ? filteredInstruments.map((instrument) => <button key={instrument.catalogId} disabled={largeScoreEditingPaused} onClick={() => {
+              if (guardLargeScoreEditing()) return;
+              const next = addInstrument(score, instrument.catalogId);
+              if (next === score) {
+                setAddOpen(false);
+                setStatus(`Could not add ${instrument.name} — the score reached its safety limit`);
+                return;
+              }
+              const selection = safeSelection(next, next.parts.at(-1)?.id);
+              commit(next, `Added ${instrument.name}`);
+              setSelectedEventTarget(null);
+              setSelectedPartId(selection.partId);
+              setSelectedStaffId(selection.staffId);
+              setAddOpen(false);
+            }}><span className="catalog-color" style={{ background: instrument.color }} /><span><strong>{instrument.name}</strong><small>{instrument.family} · {instrument.staffClefs?.join(" + ") ?? instrument.clef} {instrument.staffClefs ? "staves" : "clef"}{instrument.transposition.chromatic || instrument.transposition.octaveChange ? ` · ${instrument.transposition.chromatic + instrument.transposition.octaveChange * 12} semitones` : ""}</small></span><Plus size={15} /></button>) : (
+              <div className="catalog-empty"><strong>No instruments found</strong><span>Try another name or clear the family filter.</span><button type="button" onClick={() => { setInstrumentQuery(""); setActiveFamily("All"); }}>Clear search and filters</button></div>
+            )}</div>
           </section>
         </div>
       ) : null}
@@ -1571,8 +1914,8 @@ export function NotationStudio() {
       {helpOpen ? (
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setHelpOpen(false); }}>
           <section ref={activeDialogRef} tabIndex={-1} className="modal help-modal" role="dialog" aria-modal="true" aria-labelledby="shortcut-title"><header><div><span className="eyebrow">KEYBOARD FIRST</span><h2 id="shortcut-title">Compose without leaving the score</h2><p>Shortcuts are ignored while you type in a text field.</p></div><button className="icon-button" onClick={() => setHelpOpen(false)} aria-label="Close"><X size={18} /></button></header>
-            <div className="shortcut-grid"><div><span>Notes</span><p><kbd>A–G</kbd> Enter written pitch</p><p><strong>Chord</strong> Add pitches to the last note</p><p><kbd>R</kbd> Enter a rest</p><p><kbd>T</kbd> Tie matching notes</p><p><kbd>←</kbd><kbd>→</kbd> Select events while the score is focused</p><p><kbd>↑</kbd><kbd>↓</kbd> Change octave; on the score, select a staff</p><p><kbd>⌫</kbd> Clear a selected note to a rest; delete a selected rest or the previous input</p><p><kbd>⇧ ⌫</kbd> Remove selected rhythmic time and shift later events earlier</p><p><strong>Chord</strong> Delete removes the latest chord tone first</p></div><div><span>Rhythm</span><p><kbd>1–7</kbd> Whole → sixty-fourth</p><p><kbd>.</kbd> Cycle 0 → 1 → 2 dots</p></div><div><span>Project</span><p><kbd>⌘ Z</kbd> Undo</p><p><kbd>⌘ ⇧ Z</kbd> Redo</p><p><kbd>⌘ S</kbd> Save locally</p><p><kbd>⌘ P</kbd> Print / PDF</p></div><div><span>Playback</span><p><kbd>Space</kbd> Play / stop</p><p><kbd>?</kbd> This guide</p></div></div>
-            <footer><CircleHelp size={15} /><span>This alpha supports one voice per staff. Tuplets, multi-voice editing, and linked-part layout follow in the roadmap.</span></footer>
+            <div className="shortcut-grid"><div><span>Notes</span><p><kbd>A–G</kbd> Enter written pitch</p><p><strong>Chord</strong> Add pitches to the selected note, or the latest note when nothing is selected</p><p><kbd>R</kbd> Enter a rest</p><p><kbd>T</kbd> Tie matching notes</p><p><kbd>←</kbd><kbd>→</kbd> Select events while the score is focused</p><p><kbd>↑</kbd><kbd>↓</kbd> Change octave; on the score, select a staff</p><p><kbd>⌫</kbd> Clear a selected note to a rest; delete a selected rest or the previous input</p><p><kbd>⇧ ⌫</kbd> Remove selected rhythmic time and shift later events earlier</p><p><strong>Chord</strong> Delete removes the selected or latest note&apos;s last chord tone first</p></div><div><span>Rhythm</span><p><kbd>1–7</kbd> Whole → sixty-fourth</p><p><kbd>.</kbd> Cycle 0 → 1 → 2 dots</p></div><div><span>Project</span><p><kbd>⌘ Z</kbd> Undo</p><p><kbd>⌘ ⇧ Z</kbd> Redo</p><p><kbd>⌘ S</kbd> Save locally</p><p><kbd>⌘ P</kbd> Print / PDF</p></div><div><span>Playback</span><p><kbd>Space</kbd> Play / stop</p><p><kbd>?</kbd> This guide</p></div></div>
+            <footer><CircleHelp size={15} /><span>This alpha supports one voice per staff. Tuplets, multi-voice editing, and linked-part layout follow in the roadmap. <Link href="/licenses" target="_blank" rel="noopener noreferrer">Third-party licenses<span className="visually-hidden"> (opens in a new tab)</span></Link></span></footer>
           </section>
         </div>
       ) : null}
@@ -1592,7 +1935,7 @@ export function NotationStudio() {
           </section>
         </div>
       ) : null}
-      <div className="sr-status" aria-live="polite" aria-atomic="true"><span key={statusRevision}>{status}</span></div>
+      <div className="sr-status" role={statusTone(status) === "error" ? "alert" : "status"} aria-live={statusTone(status) === "error" ? "assertive" : "polite"} aria-atomic="true"><span key={statusRevision}>{status}</span></div>
     </main>
   );
 }

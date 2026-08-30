@@ -28,6 +28,19 @@ export const ARTICULATION_VELOCITY_BONUSES: Readonly<Record<Articulation, number
 export const STACCATO_GATE_RATIO = 0.5;
 
 function xml(value: string): string {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0)!;
+    const allowed = codePoint === 0x09
+      || codePoint === 0x0a
+      || codePoint === 0x0d
+      || (codePoint >= 0x20 && codePoint <= 0xd7ff)
+      || (codePoint >= 0xe000 && codePoint <= 0xfffd)
+      || (codePoint >= 0x10000 && codePoint <= 0x10ffff);
+    if (!allowed) {
+      const label = `U+${codePoint.toString(16).toUpperCase().padStart(4, "0")}`;
+      throw new Error(`MusicXML text contains XML 1.0 forbidden character ${label}.`);
+    }
+  }
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&apos;");
 }
 
@@ -274,9 +287,10 @@ function midiRoutesForParts(parts: readonly PartData[]): MidiRoute[] {
   });
 }
 
-function collectTimedNotes(score: ScoreDocument): TimedNote[] {
+function collectTimedNotes(score: ScoreDocument, includedPartIds?: ReadonlySet<string>): TimedNote[] {
   const notes: TimedNote[] = [];
   score.parts.forEach((part) => {
+    if (includedPartIds && !includedPartIds.has(part.id)) return;
     let measureStart = 0;
     const staffVelocities = new Map(part.staves.map((staff) => [staff.id, DEFAULT_MIDI_VELOCITY]));
     score.measureOrder.forEach((measureId) => {
@@ -449,11 +463,12 @@ export interface PlaybackNote {
   notatedDurationSeconds: number;
 }
 
-export function collectPlaybackNotes(score: ScoreDocument): PlaybackNote[] {
+export function collectPlaybackNotes(score: ScoreDocument, includedPartIds?: readonly string[]): PlaybackNote[] {
   const secondsPerTick = 60 / score.tempo / 960;
   const hasSolo = score.parts.some((part) => part.solo);
   const audibleParts = new Set(score.parts.filter((part) => !part.muted && (!hasSolo || part.solo)).map((part) => part.id));
-  return collectTimedNotes(score).filter((note) => audibleParts.has(note.partId)).map((note) => ({
+  const included = includedPartIds ? new Set(includedPartIds) : undefined;
+  return collectTimedNotes(score, included).filter((note) => audibleParts.has(note.partId)).map((note) => ({
     partId: note.partId,
     midi: note.midi,
     velocity: note.velocity,

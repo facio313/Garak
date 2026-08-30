@@ -1,0 +1,15 @@
+Academico Regular 0.902 and Academico Bold 0.902
+
+Copyright © 2022, Steinberg Media Technologies GmbH.
+Reserved Font Name: "Academico".
+
+Garak receives the embedded WOFF2 payloads through the VexFlow 5.0.0
+`vexflow/bravura` browser entry. The matching license copy is pinned to:
+https://github.com/vexflow/vexflow-fonts/tree/b2bc3a6070225e4d395966b36de76c36a9429b1c/academico
+
+Decoded WOFF2 SHA-256:
+- Regular: 363caf009818b9cebc7a2644d96b5dc10a20d3b5e557afdb4fb1a9a53d57e329
+- Bold: 575c2e30fcf7dd9363e49890644b2ed23b6b518c9866aadb5370d470473297b6
+
+The complete SIL Open Font License 1.1 and copyright notice are provided in
+academico-0.902-OFL-1.1.txt in this directory.

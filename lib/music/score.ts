@@ -121,7 +121,8 @@ export function addInstrument(score: ScoreDocument, catalogId: string): ScoreDoc
     candidateIndex += 1;
   }
   next.parts.push(candidate);
-  return stamp(next);
+  const stamped = stamp(next);
+  return validateScore(stamped).length ? score : stamped;
 }
 
 export function removeInstrument(score: ScoreDocument, partId: string): ScoreDocument {
@@ -377,7 +378,8 @@ function appendEmptyMeasure(score: ScoreDocument): string {
 export function appendMeasure(score: ScoreDocument): ScoreDocument {
   const next = structuredClone(score);
   appendEmptyMeasure(next);
-  return stamp(next);
+  const stamped = stamp(next);
+  return validateScore(stamped).length ? score : stamped;
 }
 
 export type RemoveLastMeasureResult =
@@ -454,7 +456,11 @@ export function appendEvent(
   const voice = part.staves[staffIndex].measures[targetMeasureId]?.voices[0];
   if (!voice) return { score, measureId: null, error: "The selected staff is missing measure structure." };
   voice.events.push(event);
-  return { score: stamp(next), measureId: targetMeasureId };
+  const stamped = stamp(next);
+  const validationError = validateScore(stamped)[0];
+  return validationError
+    ? { score, measureId: null, error: `The note was not entered because the score reached its safety limit. ${validationError}` }
+    : { score: stamped, measureId: targetMeasureId };
 }
 
 export type AddChordToneResult =
@@ -561,8 +567,20 @@ export function addChordTone(
     };
   }
   nextEvent.notes.push(structuredClone(note));
+  const stamped = stamp(next);
+  const validationError = validateScore(stamped)[0];
+  if (validationError) {
+    return {
+      score,
+      added: false,
+      measureId: target.measureId,
+      eventId: target.event.id,
+      noteId: null,
+      error: `The chord tone was not added because the score reached its safety limit. ${validationError}`,
+    };
+  }
   return {
-    score: stamp(next),
+    score: stamped,
     added: true,
     measureId: target.measureId,
     eventId: target.event.id,
@@ -778,7 +796,11 @@ export function addChordToneToEvent(
     return { score, added: false, measureId, eventId, noteId: null, error: `Event "${eventId}" is not available for chord entry.` };
   }
   nextEvent.notes.push(structuredClone(note));
-  return { score: stamp(next), added: true, measureId, eventId, noteId: note.id };
+  const stamped = stamp(next);
+  const validationError = validateScore(stamped)[0];
+  return validationError
+    ? { score, added: false, measureId, eventId, noteId: null, error: `The chord tone was not added because the score reached its safety limit. ${validationError}` }
+    : { score: stamped, added: true, measureId, eventId, noteId: note.id };
 }
 
 /** Removes only the last tone from exactly one selected chord without changing its duration. */
@@ -1420,7 +1442,7 @@ export function toggleTieLastTwo(
   }
   const tieId = uniqueId(`tie-${from.id}-${to.id}`, collectScoreIds(next));
   next.ties.push({ id: tieId, fromNoteId: from.id, toNoteId: to.id });
-  const validationError = validateScore(next).find((error) => error.startsWith("Tie "));
+  const validationError = validateScore(next)[0];
   if (validationError) {
     return { score, tied: false, error: `Tie could not be added. ${validationError}` };
   }

@@ -3,10 +3,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Beam as VexBeam, Stave as VexStave, StaveNote, Voice as VexVoice } from "vexflow";
 import { keySignaturesEqual, resolveMeasureAccidentals, timeSignaturesEqual } from "../lib/music/engraving";
+import { LIVE_ENGRAVING_LIMITS, planLiveEngraving } from "../lib/music/engraving-budget";
 import { fifthsToVexFlowKey, writtenKeyForPart } from "../lib/music/key-signatures";
 import { getDefaultBeamGroups, getFullMeasureDuration } from "../lib/music/meter";
 import type { MusicEvent, PartData, ScoreDocument, StaffData, VoiceData } from "../lib/music/model";
-import { durationTicks, measureCapacity } from "../lib/music/model";
+import { DURATION_LABELS, durationTicks, measureCapacity, pitchName } from "../lib/music/model";
 import { locatePlaybackPosition } from "../lib/music/playback-position";
 
 export interface ScoreEventSelection {
@@ -90,6 +91,13 @@ interface ScreenRect {
   height: number;
 }
 
+interface SelectedEventDetails {
+  event: MusicEvent;
+  measureId: string;
+  part: PartData;
+  staffIndex: number;
+}
+
 const ROW_HEIGHT = 86;
 const SYSTEM_GAP = 42;
 const LABEL_WIDTH = 88;
@@ -98,6 +106,14 @@ const TOP_PADDING = 32;
 const FOLLOW_MARGIN = 12;
 const EMPTY_MEASURE_LAYOUTS: readonly MeasureScreenLayout[] = [];
 const EMPTY_EVENT_LAYOUTS: readonly EventScreenLayout[] = [];
+const LIVE_LIMIT_LABELS: Record<keyof typeof LIVE_ENGRAVING_LIMITS, string> = {
+  measures: "measures",
+  rows: "staff rows",
+  staffMeasureCells: "staff-by-measure cells",
+  events: "events",
+  notes: "notes",
+  ties: "ties",
+};
 
 function pointToRectDistance(x: number, y: number, rect: ScreenRect): number {
   const dx = x < rect.x ? rect.x - x : x > rect.x + rect.width ? x - rect.x - rect.width : 0;
@@ -204,6 +220,36 @@ const VEXFLOW_ARTICULATION_CODES = {
 
 function countLabel(count: number, singular: string): string {
   return `${count} ${count === 1 ? singular : `${singular}s`}`;
+}
+
+function accessibleDurationLabel(event: MusicEvent): string {
+  const dotPrefix = event.duration.dots === 1
+    ? "dotted "
+    : event.duration.dots === 2
+      ? "double-dotted "
+      : "";
+  return `${dotPrefix}${DURATION_LABELS[event.duration.base].toLowerCase()}`;
+}
+
+function accessibleEventLabel(event: MusicEvent): string {
+  const duration = accessibleDurationLabel(event);
+  if (event.kind === "rest") return `${duration} rest`;
+  const pitches = event.notes.map((note) => pitchName(note.pitch));
+  if (pitches.length === 1) return `${pitches[0]} ${duration} note`;
+  return `${duration} chord with ${pitches.join(", ")}, ${countLabel(pitches.length, "note")}`;
+}
+
+function findSelectedEventDetails(score: ScoreDocument, selectedEventId?: string | null): SelectedEventDetails | null {
+  if (!selectedEventId) return null;
+  for (const part of score.parts) {
+    for (const [staffIndex, staff] of part.staves.entries()) {
+      for (const measureId of score.measureOrder) {
+        const event = staff.measures[measureId]?.voices[0]?.events.find((candidate) => candidate.id === selectedEventId);
+        if (event) return { event, measureId, part, staffIndex };
+      }
+    }
+  }
+  return null;
 }
 
 function vexKey(event: MusicEvent, clef: string): string[] {
@@ -327,17 +373,26 @@ export function ScoreRenderer({
     eventLayouts: [],
     error: "",
   });
-  const parts = useMemo(() => viewMode === "part" ? score.parts.filter((part) => part.id === selectedPartId) : score.parts, [score.parts, selectedPartId, viewMode]);
+  const [renderAttempt, setRenderAttempt] = useState(0);
+  const engravingPlan = useMemo(
+    () => planLiveEngraving(score, viewMode, selectedPartId),
+    [score, selectedPartId, viewMode],
+  );
+  const parts = engravingPlan.parts;
   const { rows, partGroups } = useMemo(() => buildRenderRows(parts), [parts]);
   const scale = Math.max(.55, Math.min(1.5, zoom / 100));
   const renderWidth = Math.max(480, Math.floor(physicalWidth / scale));
-  const systems = useMemo(() => buildSystems(score, rows, renderWidth), [renderWidth, rows, score]);
+  const interactiveRenderBlocked = engravingPlan.kind === "blocked";
+  const systems = useMemo(
+    () => interactiveRenderBlocked ? [] : buildSystems(score, rows, renderWidth),
+    [interactiveRenderBlocked, renderWidth, rows, score],
+  );
   const engravingWidth = Math.max(
     renderWidth,
     ...systems.map((system) => LABEL_WIDTH + RIGHT_MARGIN + system.widths.reduce((sum, width) => sum + width, 0)),
   );
   const systemHeight = rows.length * ROW_HEIGHT + SYSTEM_GAP;
-  const renderHeight = Math.max(230, systems.length * systemHeight + TOP_PADDING + 4);
+  const renderHeight = interactiveRenderBlocked ? 230 : Math.max(230, systems.length * systemHeight + TOP_PADDING + 4);
   const engravingSource = useMemo<EngravingSource>(
     () => ({ score, rows, renderWidth }),
     [renderWidth, rows, score],
@@ -380,6 +435,12 @@ export function ScoreRenderer({
       const host = hostRef.current;
       if (!host) return;
       host.replaceChildren();
+      if (interactiveRenderBlocked) {
+        if (!disposed && requestId === engravingRequestRef.current && hostRef.current === host) {
+          setEngravingState({ source: engravingSource, measureLayouts: [], eventLayouts: [], error: "" });
+        }
+        return;
+      }
       if (!rows.length) {
         if (!disposed && requestId === engravingRequestRef.current && hostRef.current === host) {
           setEngravingState({ source: engravingSource, measureLayouts: [], eventLayouts: [], error: "" });
@@ -632,7 +693,7 @@ export function ScoreRenderer({
     }
     void draw();
     return () => { disposed = true; };
-  }, [engravingSource, engravingWidth, partGroups, renderHeight, rows, score, systemHeight, systems]);
+  }, [engravingSource, engravingWidth, interactiveRenderBlocked, partGroups, renderAttempt, renderHeight, rows, score, systemHeight, systems]);
 
   const handleClick = (event: React.MouseEvent<HTMLElement>) => {
     if (!rows.length || !layoutsAreCurrent) return;
@@ -788,9 +849,20 @@ export function ScoreRenderer({
       scrollStaffRowIntoView(frameRef.current, next.rowIndex, systems.length, systemHeight, engravingWidth, scale);
     }
   };
+  const selectedEventDetails = useMemo(
+    () => findSelectedEventDetails(score, selectedEventId),
+    [score, selectedEventId],
+  );
+  const selectedEventContext = selectedEventDetails
+    ? ` Selected ${accessibleEventLabel(selectedEventDetails.event)} in part ${selectedEventDetails.part.name}, staff ${selectedEventDetails.staffIndex + 1}, measure ${score.measures[selectedEventDetails.measureId]?.number ?? selectedEventDetails.measureId}.`
+    : selectedEventId
+      ? " The selected event is no longer available."
+      : " No event selected; input uses the NEXT marker.";
   const scoreControlLabel = keyboardRow
-    ? `${score.metadata.title}. ${countLabel(score.parts.length, "part")}, ${countLabel(score.measureOrder.length, "measure")}. Selected ${keyboardRow.part.name}, staff ${keyboardRow.staffIndex + 1}, ${keyboardRow.staff.clef} clef. Click or tap a note or rest to select it for deletion. Use the Left and Right Arrow keys to select events, the Up and Down Arrow keys to select a staff, and A through G to enter notes.`
+    ? `${score.metadata.title}. ${countLabel(score.parts.length, "part")}, ${countLabel(score.measureOrder.length, "measure")}. Selected ${keyboardRow.part.name}, staff ${keyboardRow.staffIndex + 1}, ${keyboardRow.staff.clef} clef.${selectedEventContext} Click or tap a note or rest to select it for deletion. Use the Left and Right Arrow keys to select events, the Up and Down Arrow keys to select a staff, and A through G to enter notes.`
     : `${score.metadata.title}. No editable staff rows.`;
+  const engravingPending = !interactiveRenderBlocked && engravingState.source !== engravingSource && !renderError;
+  const firstExceeded = engravingPlan.exceeded[0];
   const engravingSurfaceStyle = {
     width: `${engravingWidth}px`,
     height: `${renderHeight}px`,
@@ -799,7 +871,7 @@ export function ScoreRenderer({
   } as React.CSSProperties;
 
   return (
-    <div ref={frameRef} className="engraving-frame" style={{ height: `${renderHeight * scale}px` }}>
+    <div ref={frameRef} className="engraving-frame" style={{ height: `${renderHeight * scale}px` }} aria-busy={engravingPending}>
       <div className="engraving-scroll-size" style={{ width: `${engravingWidth * scale}px`, height: `${renderHeight * scale}px` }}>
         <div className="engraving-surface" style={engravingSurfaceStyle}>
           {systems.flatMap((_, systemIndex) => highlightedRows.map((row) => (
@@ -827,10 +899,27 @@ export function ScoreRenderer({
             ><span>{playbackCursor.label}</span></div>
           ) : null}
           <div ref={hostRef} className="vexflow-host" aria-hidden="true" />
-          <button type="button" className="score-hit-target" onClick={handleClick} onKeyDown={handleRowKeyDown} aria-label={scoreControlLabel} />
+          {!interactiveRenderBlocked ? <button type="button" className="score-hit-target" onClick={handleClick} onKeyDown={handleRowKeyDown} aria-label={scoreControlLabel} /> : null}
         </div>
       </div>
-      {renderError ? <div className="engraving-error" role="alert">{renderError}</div> : null}
+      {engravingPlan.kind === "part-fallback" ? (
+        <div className="engraving-fallback" role="status">
+          Full-score engraving is above the live drawing budget. Showing {parts[0]?.name ?? "the selected part"} without changing or truncating the score.
+        </div>
+      ) : null}
+      {interactiveRenderBlocked ? (
+        <div className="engraving-deferred" role="status">
+          <strong>Interactive engraving paused to keep this score responsive.</strong>
+          <span>{countLabel(score.measureOrder.length, "measure")} × {countLabel(rows.length, "staff row")} is above this alpha&apos;s safe single-page drawing budget.</span>
+          {firstExceeded ? <span>{LIVE_LIMIT_LABELS[firstExceeded]}: {engravingPlan.stats[firstExceeded].toLocaleString("en-US")} · live limit {LIVE_ENGRAVING_LIMITS[firstExceeded].toLocaleString("en-US")}</span> : null}
+          <span>{viewMode === "score" ? "Switch to Part view to try a smaller layout. Your full score remains intact and can still be exported." : "Your score remains intact and can still be exported. Split the document into a smaller part for visual editing."}</span>
+        </div>
+      ) : null}
+      {engravingPending ? <div className="engraving-loading" role="status">Preparing notation…</div> : null}
+      {renderError ? <div className="engraving-error" role="alert"><span>{renderError}</span><button type="button" onClick={() => {
+        setEngravingState({ source: null, measureLayouts: [], eventLayouts: [], error: "" });
+        setRenderAttempt((attempt) => attempt + 1);
+      }}>Retry engraving</button></div> : null}
     </div>
   );
 }

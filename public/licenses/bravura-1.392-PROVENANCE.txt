@@ -1,0 +1,14 @@
+Bravura 1.392
+
+Copyright © 2019, Steinberg Media Technologies GmbH.
+Reserved Font Name: "Bravura".
+
+Garak receives the embedded WOFF2 payload through the VexFlow 5.0.0
+`vexflow/bravura` browser entry. The matching license copy is pinned to:
+https://github.com/vexflow/vexflow-fonts/tree/b2bc3a6070225e4d395966b36de76c36a9429b1c/bravura
+
+Decoded WOFF2 SHA-256:
+5c25278c208ca455dc7c3c0c95d833e134aca6d740a023767af50d0dfa06ef82
+
+The complete SIL Open Font License 1.1 and copyright notice are provided in
+bravura-1.392-OFL-1.1.txt in this directory.
