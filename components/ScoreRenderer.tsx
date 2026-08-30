@@ -10,7 +10,7 @@ import { fifthsToVexFlowKey, writtenKeyForPart } from "../lib/music/key-signatur
 import { getDefaultBeamGroups, getFullMeasureDuration } from "../lib/music/meter";
 import type { Clef, MusicEvent, PartData, PitchStep, ScoreDocument, StaffData, VoiceData } from "../lib/music/model";
 import { DURATION_LABELS, durationTicks, measureCapacity, pitchName } from "../lib/music/model";
-import { pitchFromStaffPointer } from "../lib/music/note-input";
+import { hasSystemShortcutModifier, pitchFromStaffPointer } from "../lib/music/note-input";
 import type { NoteEntryMethod } from "../lib/music/note-input";
 import { locatePlaybackPosition } from "../lib/music/playback-position";
 
@@ -54,6 +54,9 @@ interface ScoreRendererProps {
   inputFollowRevision?: number;
   onSelectEvent?: (selection: ScoreEventSelection | null) => void;
   noteEntryMethod?: NoteEntryMethod;
+  chordMode?: boolean;
+  pointerDurationTicks?: number;
+  pointerDurationLabel?: string;
   onShiftInputPitch?: (delta: -1 | 1) => void;
   onPointerNoteIntent?: (intent: ScorePointerNoteIntent) => void;
 }
@@ -134,11 +137,22 @@ interface SelectedEventDetails {
   staffIndex: number;
 }
 
-interface PointerNotePreview {
+interface PointerNotePreviewVariant {
   x: number;
-  y: number;
   label: string;
   unsupported: boolean;
+}
+
+interface PointerNotePreview {
+  context: EngravingState;
+  score: ScoreDocument;
+  selectedEventId: string | null;
+  chordMode: boolean;
+  durationTicks: number;
+  durationLabel: string;
+  y: number;
+  normal: PointerNotePreviewVariant;
+  chord: PointerNotePreviewVariant;
 }
 
 const ROW_HEIGHT = 86;
@@ -389,6 +403,9 @@ export function ScoreRenderer({
   inputFollowRevision = 0,
   onSelectEvent,
   noteEntryMethod = "duration-letter",
+  chordMode = false,
+  pointerDurationTicks = 0,
+  pointerDurationLabel = "Selected duration",
   onShiftInputPitch,
   onPointerNoteIntent,
 }: ScoreRendererProps) {
@@ -406,6 +423,7 @@ export function ScoreRenderer({
   });
   const [renderAttempt, setRenderAttempt] = useState(0);
   const [pointerNotePreview, setPointerNotePreview] = useState<PointerNotePreview | null>(null);
+  const [pointerShiftPressed, setPointerShiftPressed] = useState(false);
   const engravingPlan = useMemo(
     () => planLiveEngraving(score, viewMode, selectedPartId),
     [score, selectedPartId, viewMode],
@@ -434,6 +452,25 @@ export function ScoreRenderer({
   const eventLayouts = layoutsAreCurrent ? engravingState.eventLayouts : EMPTY_EVENT_LAYOUTS;
   const staffHitLayouts = layoutsAreCurrent ? engravingState.staffHitLayouts : EMPTY_STAFF_HIT_LAYOUTS;
   const renderError = layoutsAreCurrent ? engravingState.error : "";
+  const selectedEventDetails = useMemo(
+    () => findSelectedEventDetails(score, selectedEventId),
+    [score, selectedEventId],
+  );
+
+  useEffect(() => {
+    const handleShiftKey = (event: KeyboardEvent) => {
+      if (event.key === "Shift") setPointerShiftPressed(event.type === "keydown");
+    };
+    const handleWindowBlur = () => setPointerShiftPressed(false);
+    window.addEventListener("keydown", handleShiftKey);
+    window.addEventListener("keyup", handleShiftKey);
+    window.addEventListener("blur", handleWindowBlur);
+    return () => {
+      window.removeEventListener("keydown", handleShiftKey);
+      window.removeEventListener("keyup", handleShiftKey);
+      window.removeEventListener("blur", handleWindowBlur);
+    };
+  }, []);
 
   useEffect(() => {
     const frame = frameRef.current;
@@ -458,6 +495,22 @@ export function ScoreRenderer({
     return () => {
       observer.disconnect();
       if (resizeTimer !== null) window.clearTimeout(resizeTimer);
+    };
+  }, []);
+
+  useEffect(() => {
+    const frame = frameRef.current;
+    const canvas = frame?.closest<HTMLElement>(".canvas-area") ?? null;
+    const clearPointerPreview = () => setPointerNotePreview(null);
+    frame?.addEventListener("scroll", clearPointerPreview, { passive: true });
+    canvas?.addEventListener("scroll", clearPointerPreview, { passive: true });
+    window.addEventListener("scroll", clearPointerPreview, { passive: true });
+    window.addEventListener("resize", clearPointerPreview, { passive: true });
+    return () => {
+      frame?.removeEventListener("scroll", clearPointerPreview);
+      canvas?.removeEventListener("scroll", clearPointerPreview);
+      window.removeEventListener("scroll", clearPointerPreview);
+      window.removeEventListener("resize", clearPointerPreview);
     };
   }, []);
 
@@ -795,8 +848,6 @@ export function ScoreRenderer({
         }))
         .sort((left, right) => left.distance - right.distance)[0]?.layout;
       if (!pointerLayout) return;
-      onSelectPart(pointerLayout.partId);
-      onSelectStaff?.(pointerLayout.staffId);
       const pitch = pitchFromStaffPointer(
         pointerLayout.clef,
         localY,
@@ -858,6 +909,7 @@ export function ScoreRenderer({
       if (pointerNotePreview) setPointerNotePreview(null);
       return;
     }
+    setPointerShiftPressed(event.shiftKey);
     const rect = event.currentTarget.getBoundingClientRect();
     const renderedScaleX = event.currentTarget.offsetWidth > 0 ? rect.width / event.currentTarget.offsetWidth : scale;
     const renderedScaleY = event.currentTarget.offsetHeight > 0 ? rect.height / event.currentTarget.offsetHeight : scale;
@@ -888,13 +940,54 @@ export function ScoreRenderer({
     }
     const pitch = pitchFromStaffPointer(layout.clef, localY, layout.bottomLineY, layout.lineSpacing);
     const snappedStep = Math.round((layout.bottomLineY - localY) / (layout.lineSpacing / 2));
+    const measureLayout = measureLayouts.find((candidate) => candidate.measureId === layout.measureId);
+    const row = rows.find((candidate) => candidate.part.id === layout.partId && candidate.staff.id === layout.staffId);
+    const tailTick = row
+      ? getStaffVoice(row, layout.measureId).events.reduce((sum, item) => sum + durationTicks(item.duration), 0)
+      : 0;
+    const capacity = measureCapacity(score.measures[layout.measureId]);
+    const durationFits = pointerDurationTicks <= 0 || pointerDurationTicks <= capacity - tailTick;
+    const tailX = measureLayout
+      ? xForMeasureTick(measureLayout, tailTick, capacity)
+      : layout.startX;
+    const selectedChordLayout = chordMode && selectedEventDetails?.event.kind === "note"
+      ? eventLayouts.find((candidate) => candidate.eventId === selectedEventId)
+      : undefined;
+    const shiftTargetsSelectedChord = Boolean(
+      selectedChordLayout
+      && selectedChordLayout.partId === layout.partId
+      && selectedChordLayout.staffId === layout.staffId
+      && selectedChordLayout.measureId === layout.measureId,
+    );
+    const measureNumber = score.measures[layout.measureId]?.number ?? layout.measureId;
     setPointerNotePreview({
-      x: localX,
+      context: engravingState,
+      score,
+      selectedEventId,
+      chordMode,
+      durationTicks: pointerDurationTicks,
+      durationLabel: pointerDurationLabel,
       y: layout.bottomLineY - snappedStep * (layout.lineSpacing / 2),
-      label: pitch
-        ? `${pitch.step}${pitch.octave} → m. ${score.measures[layout.measureId]?.number ?? layout.measureId} end`
-        : "Percussion · use buttons",
-      unsupported: !pitch,
+      normal: {
+        x: tailX,
+        label: pitch
+          ? durationFits
+            ? `${pitch.step}${pitch.octave} → m. ${measureNumber} NEXT`
+            : `${pitch.step}${pitch.octave} · ${pointerDurationLabel} does not fit in m. ${measureNumber}`
+          : "Percussion · use buttons",
+        unsupported: !pitch || !durationFits,
+      },
+      chord: {
+        x: shiftTargetsSelectedChord && selectedChordLayout
+          ? selectedChordLayout.x + selectedChordLayout.width / 2
+          : tailX,
+        label: pitch
+          ? shiftTargetsSelectedChord
+            ? `Add ${pitch.step}${pitch.octave} to selected chord · m. ${measureNumber}`
+            : `${pitch.step}${pitch.octave} · Shift-click needs a selected note in m. ${measureNumber}`
+          : "Percussion · use buttons",
+        unsupported: !pitch || !shiftTargetsSelectedChord,
+      },
     });
   };
 
@@ -926,6 +1019,22 @@ export function ScoreRenderer({
   const entryCursorX = entryCursor?.x;
   const entryCursorTop = entryCursor?.top;
   const selectedEventLayout = selectedEventId ? eventLayouts.find((layout) => layout.eventId === selectedEventId) : undefined;
+  const pointerPreviewIsCurrent = Boolean(
+    pointerNotePreview
+    && layoutsAreCurrent
+    && pointerNotePreview.context === engravingState
+    && pointerNotePreview.score === score
+    && pointerNotePreview.selectedEventId === selectedEventId
+    && pointerNotePreview.chordMode === chordMode
+    && pointerNotePreview.durationTicks === pointerDurationTicks
+    && pointerNotePreview.durationLabel === pointerDurationLabel,
+  );
+  const visiblePointerNotePreview = pointerNotePreview && pointerPreviewIsCurrent
+    ? {
+        y: pointerNotePreview.y,
+        ...(chordMode && pointerShiftPressed ? pointerNotePreview.chord : pointerNotePreview.normal),
+      }
+    : null;
 
   useEffect(() => {
     if (!layoutsAreCurrent || inputFollowRevision === completedInputFollowRef.current) return;
@@ -958,6 +1067,13 @@ export function ScoreRenderer({
 
   const handleRowKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
     if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter"].includes(event.key)) return;
+    const arrowDurationStaffMove = noteEntryMethod === "arrow-duration"
+      && event.altKey
+      && !event.metaKey
+      && !event.ctrlKey
+      && !event.shiftKey
+      && (event.key === "ArrowUp" || event.key === "ArrowDown");
+    if (hasSystemShortcutModifier(event) && !arrowDurationStaffMove) return;
     if (
       noteEntryMethod === "arrow-duration"
       && (event.key === "ArrowUp" || event.key === "ArrowDown")
@@ -1009,10 +1125,6 @@ export function ScoreRenderer({
       scrollStaffRowIntoView(frameRef.current, next.rowIndex, systems.length, systemHeight, engravingWidth, scale);
     }
   };
-  const selectedEventDetails = useMemo(
-    () => findSelectedEventDetails(score, selectedEventId),
-    [score, selectedEventId],
-  );
   const selectedEventContext = selectedEventDetails
     ? ` Selected ${accessibleEventLabel(selectedEventDetails.event)} in part ${selectedEventDetails.part.name}, staff ${selectedEventDetails.staffIndex + 1}, measure ${score.measures[selectedEventDetails.measureId]?.number ?? selectedEventDetails.measureId}.`
     : selectedEventId
@@ -1023,7 +1135,7 @@ export function ScoreRenderer({
     : noteEntryMethod === "duration-letter"
       ? "Use 1 through 7 to choose duration and A through G to enter a written pitch. Use the Up and Down Arrow keys to select a staff."
       : noteEntryMethod === "score-pointer"
-        ? "Click or tap an empty staff line or space to append that written pitch at the end of the clicked measure. Existing notes and rests remain selectable. In Chord mode, Shift-click adds a tone only when a chord is selected on that staff."
+        ? "Click or tap an empty staff line or space to append that written pitch at the NEXT position in the clicked measure. Existing notes and rests remain selectable. In Chord mode, Shift-click adds a tone only when a note is selected in that same staff and measure."
         : "Use the visible Do through Ti pitch buttons or Rest. Use the Up and Down Arrow keys to select a staff.";
   const scoreControlLabel = keyboardRow
     ? `${score.metadata.title}. ${countLabel(score.parts.length, "part")}, ${countLabel(score.measureOrder.length, "measure")}. Selected ${keyboardRow.part.name}, staff ${keyboardRow.staffIndex + 1}, ${keyboardRow.staff.clef} clef.${selectedEventContext} Click or tap a note or rest to select it for deletion. Use the Left and Right Arrow keys to select events. ${entryMethodGuidance}`
@@ -1055,12 +1167,12 @@ export function ScoreRenderer({
               aria-hidden="true"
             />
           ) : null}
-          {noteEntryMethod === "score-pointer" && pointerNotePreview ? (
+          {noteEntryMethod === "score-pointer" && visiblePointerNotePreview ? (
             <div
-              className={`pointer-note-preview ${pointerNotePreview.unsupported ? "unsupported" : ""}`}
-              style={{ left: pointerNotePreview.x, top: pointerNotePreview.y }}
+              className={`pointer-note-preview ${visiblePointerNotePreview.unsupported ? "unsupported" : ""}`}
+              style={{ left: visiblePointerNotePreview.x, top: visiblePointerNotePreview.y }}
               aria-hidden="true"
-            ><span>{pointerNotePreview.label}</span></div>
+            ><span>{visiblePointerNotePreview.label}</span></div>
           ) : null}
           {entryCursor ? (
             <div className="entry-caret" style={{ left: entryCursor.x, top: entryCursor.top }} aria-hidden="true"><span>NEXT</span></div>

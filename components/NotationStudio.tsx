@@ -35,7 +35,16 @@ import type { KeySignature } from "../lib/music/key-signatures";
 import type { Articulation, DurationBase, DurationValue, DynamicMarking, MusicEvent, PitchStep, ScoreDocument, ScoreNote } from "../lib/music/model";
 import { ARTICULATIONS, DURATION_LABELS, DYNAMIC_MARKINGS, TICKS_PER_QUARTER, durationTicks, eventCount, getPrimaryVoice, nextAugmentationDotCount, pitchName, resolveStaffIndex, validateScore, voiceTicks } from "../lib/music/model";
 import { MAX_MUSICXML_FILE_BYTES, MAX_NATIVE_FILE_BYTES, serializeNativeScore } from "../lib/music/native-format";
-import { SOLFEGE, noteEntryMethodShortLabel, shiftDiatonicPitch } from "../lib/music/note-input";
+import {
+  SOLFEGE,
+  durationKeyAction,
+  hasSystemShortcutModifier,
+  letterKeyAction,
+  noteEntryMethodShortLabel,
+  pitchButtonAction,
+  sameStaffMeasureTarget,
+  shiftDiatonicPitch,
+} from "../lib/music/note-input";
 import type { DiatonicPitch, NoteEntryMethod } from "../lib/music/note-input";
 import { locatePlaybackPosition } from "../lib/music/playback-position";
 import { addChordTone, addChordToneToEvent, addInstrument, appendEvent, appendEventToMeasure, appendMeasure, clearEventToRest, createScore, findEventTargetMeasureId, makeEvent, removeChordToneFromEvent, removeEvent, removeInstrument, removeLastChordTone, removeLastEvent, removeLastMeasure, setEventArticulation, setEventDynamic, setKeyFromMeasure, setLastEventDynamic, setLastNoteArticulation, setTimeFromMeasure, toggleTieLastTwo, updatePart } from "../lib/music/score";
@@ -120,7 +129,7 @@ function noteEntryInstruction(
     return `${noteEntryMethodShortLabel(method)} · ${durationName(base, dots)} selected · press A–G to enter`;
   }
   if (method === "score-pointer") {
-    return `${noteEntryMethodShortLabel(method)} · ${durationName(base, dots)} selected · click a staff line or space to add at that measure's end`;
+    return `${noteEntryMethodShortLabel(method)} · ${durationName(base, dots)} selected · click a staff line or space to add at that measure's NEXT position`;
   }
   return `${noteEntryMethodShortLabel(method)} · ${durationName(base, dots)} selected · press 도(C) through 시(B), or Rest`;
 }
@@ -1117,18 +1126,25 @@ export function NotationStudio() {
 
   const enterPointerNote = useCallback((intent: ScorePointerNoteIntent) => {
     if (noteEntryMethod !== "score-pointer") return;
-    setSelectedPartId(intent.partId);
-    setSelectedStaffId(intent.staffId);
     if (intent.kind === "unsupported") {
+      setSelectedPartId(intent.partId);
+      setSelectedStaffId(intent.staffId);
+      setSelectedEventTarget(null);
       setStatus("Score click input is not available on percussion staves yet — use the visible pitch buttons or switch input method");
       return;
     }
-    setInputPitch({ step: intent.step, octave: intent.octave });
-    const addToSelectedChord = intent.addToChord
-      && chordMode
+    const requestedSelectedChord = intent.addToChord && chordMode;
+    const addToSelectedChord = requestedSelectedChord
       && selectedEvent?.kind === "note"
-      && selectedEventTarget?.partId === intent.partId
-      && selectedEventTarget.staffId === intent.staffId;
+      && sameStaffMeasureTarget(selectedEventTarget, intent);
+    if (requestedSelectedChord && !addToSelectedChord) {
+      setStatus("Shift-click needs a selected note in the same staff and measure. No note was entered.");
+      return;
+    }
+    setSelectedPartId(intent.partId);
+    setSelectedStaffId(intent.staffId);
+    if (!addToSelectedChord) setSelectedEventTarget(null);
+    setInputPitch({ step: intent.step, octave: intent.octave });
     enterEvent(intent.step, false, {
       partId: intent.partId,
       staffId: intent.staffId,
@@ -1136,7 +1152,17 @@ export function NotationStudio() {
       octave: intent.octave,
       startNewChord: !addToSelectedChord,
     });
-  }, [chordMode, enterEvent, noteEntryMethod, selectedEvent, selectedEventTarget]);
+  }, [chordMode, enterEvent, noteEntryMethod, selectedEvent, selectedEventTarget, setSelectedEventTarget]);
+
+  const activatePitchButton = useCallback((step: PitchStep) => {
+    if (pitchButtonAction(noteEntryMethod) === "select") {
+      const next = { step, octave: inputPitch.octave };
+      setInputPitch(next);
+      setStatus(`${inputPitchLabel(next)} selected · press 1–7 to enter`);
+      return;
+    }
+    enterEvent(step);
+  }, [enterEvent, inputPitch.octave, noteEntryMethod]);
 
   const toggleTie = useCallback(() => {
     if (guardLargeScoreEditing()) return;
@@ -1322,7 +1348,7 @@ export function NotationStudio() {
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null;
+      const target = event.target instanceof Element ? event.target : null;
       if (event.key === "Escape") {
         const returnToMobileTools = mobileToolsOpen;
         const returnToExportMenu = exportOpen && Boolean(target?.closest(".export-menu"));
@@ -1350,6 +1376,7 @@ export function NotationStudio() {
         else window.print();
         return;
       }
+      if (hasSystemShortcutModifier(event)) return;
       if (notationToolbarControl && (event.key === " " || event.key === "Enter")) return;
       const typing = textEntry || unrelatedInteractive;
       if (event.isComposing || typing) return;
@@ -1381,7 +1408,7 @@ export function NotationStudio() {
         event.preventDefault();
         const nextDuration = DURATION_CHOICES[durationIndex].value;
         setDuration(nextDuration);
-        if (noteEntryMethod === "arrow-duration") {
+        if (durationKeyAction(noteEntryMethod) === "enter") {
           if (!event.repeat) enterEvent(inputPitch.step, false, { duration: nextDuration, octave: inputPitch.octave });
         } else {
           setStatus(noteEntryInstruction(noteEntryMethod, inputPitch, nextDuration, dotCount));
@@ -1392,8 +1419,9 @@ export function NotationStudio() {
       if (["A", "B", "C", "D", "E", "F", "G"].includes(step)) {
         event.preventDefault();
         if (event.repeat) return;
-        if (noteEntryMethod === "duration-letter") enterEvent(step as PitchStep);
-        else if (noteEntryMethod === "arrow-duration") {
+        const action = letterKeyAction(noteEntryMethod);
+        if (action === "enter") enterEvent(step as PitchStep);
+        else if (action === "select") {
           const next = { step: step as PitchStep, octave: inputPitch.octave };
           setInputPitch(next);
           setStatus(`${inputPitchLabel(next)} selected · press 1–7 to enter`);
@@ -1751,20 +1779,29 @@ export function NotationStudio() {
             onClick={() => {
               const next = !chordMode;
               setChordMode(next);
-              setStatus(next
-                ? selectedEvent?.kind === "note" ? "Chord mode on — the next pitch adds to the selected note" : lastEvent?.kind === "note" ? "Chord mode on — the next pitch adds to the latest note" : "Chord mode on — the next pitch starts a new chord"
-                : "Chord mode off — the next pitch starts a new note");
+              setStatus(!next
+                ? "Chord mode off — the next pitch starts a new note"
+                : noteEntryMethod === "score-pointer"
+                  ? selectedEvent?.kind === "note"
+                    ? "Chord mode on — Shift-click in that note's staff and measure to add a tone; ordinary score click starts a new chord"
+                    : "Chord mode on — ordinary score click starts a new chord; select a note before Shift-clicking to add a tone"
+                  : selectedEvent?.kind === "note" ? "Chord mode on — the next pitch adds to the selected note" : lastEvent?.kind === "note" ? "Chord mode on — the next pitch adds to the latest note" : "Chord mode on — the next pitch starts a new chord");
             }}
-            aria-label={`Chord mode. ${selectedEvent?.kind === "note" ? "Add the next pitch to the selected note event" : lastEvent?.kind === "note" ? "Add the next pitch to the latest note event" : "Start a chord with the next pitch"}`}
+            aria-label={noteEntryMethod === "score-pointer"
+              ? "Chord mode. Ordinary score click starts a new chord. Shift-click adds to a selected note in the same staff and measure. Pitch buttons add directly."
+              : `Chord mode. ${selectedEvent?.kind === "note" ? "Add the next pitch to the selected note event" : lastEvent?.kind === "note" ? "Add the next pitch to the latest note event" : "Start a chord with the next pitch"}`}
             aria-pressed={chordMode}
           >Chord</button>
         </div>
-        <div className="pitch-keys" role="group" aria-label="Enter pitch or rest">
+        <div className="pitch-keys" role="group" aria-label={noteEntryMethod === "arrow-duration" ? "Select pitch or enter rest" : "Enter pitch or rest"}>
           {(["C", "D", "E", "F", "G", "A", "B"] as PitchStep[]).map((step) => {
             const previewAlter = inputAlter(accidentalMode, previewWrittenKey, step);
             const suffix = previewAlter === 0 && accidentalMode === "auto" ? "" : accidentalGlyph(previewAlter);
-            const action = canAddChordTone ? `Add to the ${chordActionTarget}` : chordMode ? "Start a chord with" : "Enter";
-            return <button className={inputPitch.step === step ? "pitch-current" : ""} key={step} disabled={largeScoreEditingPaused} onClick={() => enterEvent(step)} aria-label={`${action} ${step}${suffix}${octave}, ${SOLFEGE[step]}, ${accidentalMode} accidental mode`}><span className="pitch-name"><strong>{SOLFEGE[step]}</strong><small>{step}{suffix}{octave}</small></span><kbd>{step}</kbd></button>;
+            const action = noteEntryMethod === "arrow-duration"
+              ? "Select"
+              : canAddChordTone ? `Add to the ${chordActionTarget}` : chordMode ? "Start a chord with" : "Enter";
+            const nextInstruction = noteEntryMethod === "arrow-duration" ? "; press 1 through 7 to enter" : "";
+            return <button className={inputPitch.step === step ? "pitch-current" : ""} key={step} disabled={largeScoreEditingPaused} onClick={() => activatePitchButton(step)} aria-label={`${action} ${step}${suffix}${octave}, ${SOLFEGE[step]}, ${accidentalMode} accidental mode${nextInstruction}`}><span className="pitch-name"><strong>{SOLFEGE[step]}</strong><small>{step}{suffix}{octave}</small></span>{noteEntryMethod === "duration-letter" ? <kbd>{step}</kbd> : null}</button>;
           })}
           <button className="rest-key" disabled={largeScoreEditingPaused} onClick={() => enterEvent("C", true)} aria-label={chordMode ? "Enter a rest; chord mode is ignored for rests" : "Enter a rest"}><span>Rest</span><kbd>R</kbd></button>
         </div>
@@ -1830,12 +1867,15 @@ export function NotationStudio() {
           <button onClick={redo} disabled={!future.length} aria-label="Redo edit"><Redo2 size={18} /></button>
           <button className="mobile-delete-button" onClick={() => removeLatestInput()} disabled={largeScoreEditingPaused || !deletionTargetEvent} aria-label={deleteActionLabel}><Trash2 size={18} /></button>
         </div>
-        <div className="mobile-pitch-keys" role="group" aria-label="Enter pitch or rest">
+        <div className="mobile-pitch-keys" role="group" aria-label={noteEntryMethod === "arrow-duration" ? "Select pitch or enter rest" : "Enter pitch or rest"}>
           {(["C", "D", "E", "F", "G", "A", "B"] as PitchStep[]).map((step) => {
             const previewAlter = inputAlter(accidentalMode, previewWrittenKey, step);
             const suffix = previewAlter === 0 && accidentalMode === "auto" ? "" : accidentalGlyph(previewAlter);
-            const action = canAddChordTone ? `Add to the ${chordActionTarget}` : chordMode ? "Start a chord with" : "Enter";
-            return <button className={inputPitch.step === step ? "pitch-current" : ""} key={step} disabled={largeScoreEditingPaused} onClick={() => enterEvent(step)} aria-label={`${action} ${step}${suffix}${octave}, ${SOLFEGE[step]}`}><span>{SOLFEGE[step]}</span><small>{step}{suffix}{octave}</small></button>;
+            const action = noteEntryMethod === "arrow-duration"
+              ? "Select"
+              : canAddChordTone ? `Add to the ${chordActionTarget}` : chordMode ? "Start a chord with" : "Enter";
+            const nextInstruction = noteEntryMethod === "arrow-duration" ? "; press 1 through 7 to enter" : "";
+            return <button className={inputPitch.step === step ? "pitch-current" : ""} key={step} disabled={largeScoreEditingPaused} onClick={() => activatePitchButton(step)} aria-label={`${action} ${step}${suffix}${octave}, ${SOLFEGE[step]}${nextInstruction}`}><span>{SOLFEGE[step]}</span><small>{step}{suffix}{octave}</small></button>;
           })}
           <button className="mobile-rest-key" disabled={largeScoreEditingPaused} onClick={() => enterEvent("C", true)} aria-label="Enter a rest">Rest</button>
         </div>
@@ -1878,7 +1918,7 @@ export function NotationStudio() {
             <span className="canvas-hint">
               {noteEntryMethod === "arrow-duration" ? <><kbd>↑ ↓</kbd> pitch <kbd>1–7</kbd> enter</>
                 : noteEntryMethod === "duration-letter" ? <><kbd>1–7</kbd> duration <kbd>A–G</kbd> enter</>
-                  : noteEntryMethod === "score-pointer" ? <>Click a line or space · add at clicked measure end</>
+                  : noteEntryMethod === "score-pointer" ? <>Click a line or space · add at clicked measure NEXT</>
                     : <>Use <strong>도(C)–시(B)</strong> buttons</>}
               {" "}<kbd>R</kbd> rest <kbd>⌫</kbd> delete <kbd>Space</kbd> play
             </span>
@@ -1900,6 +1940,9 @@ export function NotationStudio() {
               onSelectPart={selectPart}
               onSelectStaff={selectStaff}
               noteEntryMethod={noteEntryMethod}
+              chordMode={chordMode}
+              pointerDurationTicks={durationTicks({ base: duration, dots: dotCount })}
+              pointerDurationLabel={durationName(duration, dotCount)}
               onShiftInputPitch={shiftInputPitch}
               onPointerNoteIntent={enterPointerNote}
             />
@@ -2026,7 +2069,7 @@ export function NotationStudio() {
           <div className="shortcut-card"><span>{noteEntryMethodShortLabel(noteEntryMethod).toUpperCase()}</span>
             {noteEntryMethod === "arrow-duration" ? <p><kbd>↑ ↓</kbd> choose {inputPitchLabel(inputPitch)} <kbd>1–7</kbd> enter</p>
               : noteEntryMethod === "duration-letter" ? <p><kbd>1–7</kbd> duration <kbd>A–G</kbd> enter pitch</p>
-                : noteEntryMethod === "score-pointer" ? <p>Click a blank staff line or space to add at that measure&apos;s end</p>
+                : noteEntryMethod === "score-pointer" ? <p>Click a blank staff line or space to add at that measure&apos;s NEXT position</p>
                   : <p>Press the visible 도(C)–시(B) or Rest buttons</p>}
             <p><kbd>.</kbd> 0–2 dots <kbd>R</kbd> rest</p><p><kbd>← →</kbd> select event <kbd>⌫</kbd> delete</p><p>{noteEntryMethod === "arrow-duration" ? <><kbd>Alt ↑ ↓</kbd> staff</> : <><kbd>↑ ↓</kbd> octave / staff</>} <kbd>Space</kbd> play</p><button onClick={openHelpDialog}>View all input methods <ChevronDown size={12} /></button></div>
         </aside>
@@ -2072,7 +2115,7 @@ export function NotationStudio() {
       {helpOpen ? (
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setHelpOpen(false); }}>
           <section ref={activeDialogRef} tabIndex={-1} className="modal help-modal" role="dialog" aria-modal="true" aria-labelledby="shortcut-title"><header><div><span className="eyebrow">KEYBOARD FIRST</span><h2 id="shortcut-title">Compose without leaving the score</h2><p>Shortcuts are ignored while you type in a text field.</p></div><button className="icon-button" onClick={() => setHelpOpen(false)} aria-label="Close"><X size={18} /></button></header>
-            <div className="shortcut-grid"><div><span>Four input methods</span><p><strong>1 · Arrow → number</strong><br /><kbd>↑</kbd><kbd>↓</kbd> chooses one staff step at a time; <kbd>1–7</kbd> enters the selected pitch and duration. <kbd>Alt ↑ ↓</kbd> changes staff while the score is focused.</p><p><strong>2 · Number → letter</strong><br /><kbd>1–7</kbd> chooses duration; <kbd>A–G</kbd> enters the written pitch.</p><p><strong>3 · Score click / tap</strong><br />Choose duration, then click a blank staff line or space. Garak appends the pitch at the end of that clicked measure; clicking an existing event selects it. In Chord mode, hold Shift while clicking to add a tone to the selected chord.</p><p><strong>4 · Buttons / touch</strong><br />Use 도(C), 레(D), 미(E), 파(F), 솔(G), 라(A), 시(B), or Rest.</p></div><div><span>Notes & rhythm</span><p><strong>Fixed-do map</strong> 도=C · 레=D · 미=E · 파=F · 솔=G · 라=A · 시=B</p><p><kbd>1–7</kbd> Whole → sixty-fourth</p><p><kbd>.</kbd> Cycle 0 → 1 → 2 dots</p><p><kbd>R</kbd> Enter a rest</p><p><kbd>T</kbd> Tie matching notes</p><p><strong>Chord</strong> Add pitches to the selected note, or the latest note when nothing is selected</p></div><div><span>Select & edit</span><p><kbd>←</kbd><kbd>→</kbd> Select events while the score is focused</p><p><kbd>⌫</kbd> Clear a selected note to a rest; delete a selected rest or the previous input</p><p><kbd>⇧ ⌫</kbd> Remove selected rhythmic time and shift later events earlier</p><p><strong>Chord</strong> Delete removes the selected or latest note&apos;s last chord tone first</p><p><kbd>⌘ Z</kbd> Undo · <kbd>⌘ ⇧ Z</kbd> Redo</p></div><div><span>Project & playback</span><p><kbd>⌘ S</kbd> Save locally</p><p><kbd>⌘ P</kbd> Print / PDF</p><p><kbd>Space</kbd> Play / stop</p><p><kbd>?</kbd> This guide</p></div></div>
+            <div className="shortcut-grid"><div><span>Four input methods</span><p><strong>1 · Arrow → number</strong><br /><kbd>↑</kbd><kbd>↓</kbd> chooses one staff step at a time; <kbd>1–7</kbd> enters the selected pitch and duration. The visible 도–시 buttons also select pitch in this mode. <kbd>Alt ↑ ↓</kbd> changes staff while the score is focused.</p><p><strong>2 · Number → letter</strong><br /><kbd>1–7</kbd> chooses duration; <kbd>A–G</kbd> enters the written pitch.</p><p><strong>3 · Score click / tap</strong><br />Choose duration, then click a blank staff line or space. Garak appends the pitch at that clicked measure&apos;s NEXT position; clicking an existing event selects it. In Chord mode, Shift-click adds a tone only when a note is selected in the same staff and measure.</p><p><strong>4 · Buttons / touch</strong><br />Use 도(C), 레(D), 미(E), 파(F), 솔(G), 라(A), 시(B), or Rest.</p></div><div><span>Notes & rhythm</span><p><strong>Fixed-do map</strong> 도=C · 레=D · 미=E · 파=F · 솔=G · 라=A · 시=B</p><p><kbd>1–7</kbd> Whole → sixty-fourth</p><p><kbd>.</kbd> Cycle 0 → 1 → 2 dots</p><p><kbd>R</kbd> Enter a rest</p><p><kbd>T</kbd> Tie matching notes</p><p><strong>Chord</strong> Add pitches to the selected note, or the latest note when nothing is selected</p></div><div><span>Select & edit</span><p><kbd>←</kbd><kbd>→</kbd> Select events while the score is focused</p><p><kbd>⌫</kbd> Clear a selected note to a rest; delete a selected rest or the previous input</p><p><kbd>⇧ ⌫</kbd> Remove selected rhythmic time and shift later events earlier</p><p><strong>Chord</strong> Delete removes the selected or latest note&apos;s last chord tone first</p><p><kbd>⌘ Z</kbd> Undo · <kbd>⌘ ⇧ Z</kbd> Redo</p></div><div><span>Project & playback</span><p><kbd>⌘ S</kbd> Save locally</p><p><kbd>⌘ P</kbd> Print / PDF</p><p><kbd>Space</kbd> Play / stop</p><p><kbd>?</kbd> This guide</p></div></div>
             <footer><CircleHelp size={15} /><span>This alpha supports one voice per staff. Tuplets, multi-voice editing, and linked-part layout follow in the roadmap. <Link href="/licenses" target="_blank" rel="noopener noreferrer">Third-party licenses<span className="visually-hidden"> (opens in a new tab)</span></Link></span></footer>
           </section>
         </div>

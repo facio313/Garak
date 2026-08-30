@@ -9,6 +9,22 @@ export const NOTE_ENTRY_METHODS = [
 
 export type NoteEntryMethod = typeof NOTE_ENTRY_METHODS[number];
 
+export type DurationKeyAction = "enter" | "select";
+export type LetterKeyAction = "enter" | "select" | "ignore";
+export type PitchButtonAction = "enter" | "select";
+
+export interface ShortcutModifiers {
+  altKey: boolean;
+  ctrlKey: boolean;
+  metaKey: boolean;
+}
+
+export interface StaffMeasureTarget {
+  partId: string;
+  staffId: string;
+  measureId: string;
+}
+
 export interface DiatonicPitch {
   step: PitchStep;
   octave: number;
@@ -47,6 +63,39 @@ export function diatonicPitchFromIndex(index: number): DiatonicPitch {
 /** Moves by written staff steps and keeps the editor's supported C0–B8 range. */
 export function shiftDiatonicPitch(pitch: DiatonicPitch, delta: number): DiatonicPitch {
   return diatonicPitchFromIndex(diatonicPitchIndex(pitch) + delta);
+}
+
+/** Keeps each selectable input grammar explicit and independently testable. */
+export function durationKeyAction(method: NoteEntryMethod): DurationKeyAction {
+  return method === "arrow-duration" ? "enter" : "select";
+}
+
+export function letterKeyAction(method: NoteEntryMethod): LetterKeyAction {
+  if (method === "duration-letter") return "enter";
+  if (method === "arrow-duration") return "select";
+  return "ignore";
+}
+
+export function pitchButtonAction(method: NoteEntryMethod): PitchButtonAction {
+  return method === "arrow-duration" ? "select" : "enter";
+}
+
+/** Browser and OS modifier chords must never mutate the score as plain input. */
+export function hasSystemShortcutModifier(modifiers: ShortcutModifiers): boolean {
+  return modifiers.metaKey || modifiers.ctrlKey || modifiers.altKey;
+}
+
+export function sameStaffMeasureTarget(
+  left: StaffMeasureTarget | null | undefined,
+  right: StaffMeasureTarget | null | undefined,
+): boolean {
+  return Boolean(
+    left
+    && right
+    && left.partId === right.partId
+    && left.staffId === right.staffId
+    && left.measureId === right.measureId,
+  );
 }
 
 const CLEF_BOTTOM_LINE_PITCH: Partial<Record<Clef, DiatonicPitch>> = {

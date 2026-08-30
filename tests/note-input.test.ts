@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { getPrimaryVoice, validateScore } from "../lib/music/model";
-import { pitchFromStaffPointer, shiftDiatonicPitch } from "../lib/music/note-input";
+import {
+  durationKeyAction,
+  hasSystemShortcutModifier,
+  letterKeyAction,
+  pitchButtonAction,
+  pitchFromStaffPointer,
+  sameStaffMeasureTarget,
+  shiftDiatonicPitch,
+} from "../lib/music/note-input";
 import { appendEventToMeasure, createScore, makeEvent } from "../lib/music/score";
 
 test("diatonic arrow input crosses octave boundaries and clamps to C0 through B8", () => {
@@ -10,6 +18,39 @@ test("diatonic arrow input crosses octave boundaries and clamps to C0 through B8
   assert.deepEqual(shiftDiatonicPitch({ step: "B", octave: 4 }, 1), { step: "C", octave: 5 });
   assert.deepEqual(shiftDiatonicPitch({ step: "C", octave: 0 }, -100), { step: "C", octave: 0 });
   assert.deepEqual(shiftDiatonicPitch({ step: "B", octave: 8 }, 100), { step: "B", octave: 8 });
+});
+
+test("each input method has one explicit duration, letter, and pitch-button grammar", () => {
+  assert.equal(durationKeyAction("arrow-duration"), "enter");
+  assert.equal(durationKeyAction("duration-letter"), "select");
+  assert.equal(durationKeyAction("score-pointer"), "select");
+  assert.equal(durationKeyAction("buttons"), "select");
+
+  assert.equal(letterKeyAction("arrow-duration"), "select");
+  assert.equal(letterKeyAction("duration-letter"), "enter");
+  assert.equal(letterKeyAction("score-pointer"), "ignore");
+  assert.equal(letterKeyAction("buttons"), "ignore");
+
+  assert.equal(pitchButtonAction("arrow-duration"), "select");
+  assert.equal(pitchButtonAction("duration-letter"), "enter");
+  assert.equal(pitchButtonAction("score-pointer"), "enter");
+  assert.equal(pitchButtonAction("buttons"), "enter");
+});
+
+test("system modifiers cannot fall through to notation input", () => {
+  assert.equal(hasSystemShortcutModifier({ metaKey: true, ctrlKey: false, altKey: false }), true);
+  assert.equal(hasSystemShortcutModifier({ metaKey: false, ctrlKey: true, altKey: false }), true);
+  assert.equal(hasSystemShortcutModifier({ metaKey: false, ctrlKey: false, altKey: true }), true);
+  assert.equal(hasSystemShortcutModifier({ metaKey: false, ctrlKey: false, altKey: false }), false);
+});
+
+test("pointer chord targeting requires the same part, staff, and measure", () => {
+  const selected = { partId: "part-a", staffId: "staff-a", measureId: "measure-a" };
+  assert.equal(sameStaffMeasureTarget(selected, { ...selected }), true);
+  assert.equal(sameStaffMeasureTarget(selected, { ...selected, partId: "part-b" }), false);
+  assert.equal(sameStaffMeasureTarget(selected, { ...selected, staffId: "staff-b" }), false);
+  assert.equal(sameStaffMeasureTarget(selected, { ...selected, measureId: "measure-b" }), false);
+  assert.equal(sameStaffMeasureTarget(null, selected), false);
 });
 
 test("pointer input snaps every supported clef line to its written pitch", () => {
