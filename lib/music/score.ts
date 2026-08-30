@@ -463,6 +463,49 @@ export function appendEvent(
     : { score: stamped, measureId: targetMeasureId };
 }
 
+/**
+ * Appends to the end of one explicit measure. This is intentionally a
+ * measure-tail operation, not arbitrary tick insertion: pointer entry can
+ * therefore honor the clicked measure without pretending to support event
+ * splitting or rhythmic reflow.
+ */
+export function appendEventToMeasure(
+  score: ScoreDocument,
+  partId: string,
+  measureId: string,
+  event: MusicEvent,
+  staffIdOrIndex: StaffSelector = 0,
+): { score: ScoreDocument; measureId: string | null; error?: string } {
+  const sourceMeasure = score.measures[measureId];
+  if (!sourceMeasure || !score.measureOrder.includes(measureId)) {
+    return { score, measureId: null, error: "The clicked measure is no longer available." };
+  }
+
+  const next = structuredClone(score);
+  const part = next.parts.find((item) => item.id === partId);
+  if (!part) return { score, measureId: null, error: "Select an instrument first." };
+  const staffIndex = resolveStaffIndex(part, staffIdOrIndex);
+  if (staffIndex < 0) return { score, measureId: null, error: "Select a valid staff first." };
+  const voice = part.staves[staffIndex].measures[measureId]?.voices[0];
+  if (!voice) return { score, measureId: null, error: "The selected staff is missing measure structure." };
+
+  const remainingTicks = measureCapacity(sourceMeasure) - voiceTicks(voice);
+  if (durationTicks(event.duration) > remainingTicks) {
+    return {
+      score,
+      measureId: null,
+      error: `Measure ${sourceMeasure.number} does not have room for that duration. Choose a shorter value or click another measure.`,
+    };
+  }
+
+  voice.events.push(event);
+  const stamped = stamp(next);
+  const validationError = validateScore(stamped)[0];
+  return validationError
+    ? { score, measureId: null, error: `The note was not entered because the score reached its safety limit. ${validationError}` }
+    : { score: stamped, measureId };
+}
+
 export type AddChordToneResult =
   | {
       score: ScoreDocument;

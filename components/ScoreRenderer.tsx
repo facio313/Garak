@@ -8,8 +8,10 @@ import { waitForEngravingFonts } from "../lib/music/engraving-fonts";
 import { type MeasureTickLayout, xForMeasureTick } from "../lib/music/engraving-position";
 import { fifthsToVexFlowKey, writtenKeyForPart } from "../lib/music/key-signatures";
 import { getDefaultBeamGroups, getFullMeasureDuration } from "../lib/music/meter";
-import type { MusicEvent, PartData, ScoreDocument, StaffData, VoiceData } from "../lib/music/model";
+import type { Clef, MusicEvent, PartData, PitchStep, ScoreDocument, StaffData, VoiceData } from "../lib/music/model";
 import { DURATION_LABELS, durationTicks, measureCapacity, pitchName } from "../lib/music/model";
+import { pitchFromStaffPointer } from "../lib/music/note-input";
+import type { NoteEntryMethod } from "../lib/music/note-input";
 import { locatePlaybackPosition } from "../lib/music/playback-position";
 
 export interface ScoreEventSelection {
@@ -18,6 +20,24 @@ export interface ScoreEventSelection {
   measureId: string;
   eventId: string;
 }
+
+export type ScorePointerNoteIntent =
+  | {
+      kind: "pitch";
+      partId: string;
+      staffId: string;
+      measureId: string;
+      step: PitchStep;
+      octave: number;
+      addToChord: boolean;
+    }
+  | {
+      kind: "unsupported";
+      partId: string;
+      staffId: string;
+      measureId: string;
+      clef: Clef;
+    };
 
 interface ScoreRendererProps {
   score: ScoreDocument;
@@ -33,6 +53,9 @@ interface ScoreRendererProps {
   selectedEventId?: string | null;
   inputFollowRevision?: number;
   onSelectEvent?: (selection: ScoreEventSelection | null) => void;
+  noteEntryMethod?: NoteEntryMethod;
+  onShiftInputPitch?: (delta: -1 | 1) => void;
+  onPointerNoteIntent?: (intent: ScorePointerNoteIntent) => void;
 }
 
 interface SystemLayout {
@@ -70,6 +93,19 @@ interface EventScreenLayout extends ScoreEventSelection {
   height: number;
 }
 
+interface StaffMeasureHitLayout {
+  partId: string;
+  staffId: string;
+  measureId: string;
+  systemIndex: number;
+  startX: number;
+  endX: number;
+  topLineY: number;
+  bottomLineY: number;
+  lineSpacing: number;
+  clef: Clef;
+}
+
 interface EngravingSource {
   score: ScoreDocument;
   rows: readonly RenderRow[];
@@ -80,6 +116,7 @@ interface EngravingState {
   source: EngravingSource | null;
   measureLayouts: MeasureScreenLayout[];
   eventLayouts: EventScreenLayout[];
+  staffHitLayouts: StaffMeasureHitLayout[];
   error: string;
 }
 
@@ -97,6 +134,13 @@ interface SelectedEventDetails {
   staffIndex: number;
 }
 
+interface PointerNotePreview {
+  x: number;
+  y: number;
+  label: string;
+  unsupported: boolean;
+}
+
 const ROW_HEIGHT = 86;
 const SYSTEM_GAP = 42;
 const LABEL_WIDTH = 88;
@@ -105,6 +149,7 @@ const TOP_PADDING = 32;
 const FOLLOW_MARGIN = 12;
 const EMPTY_MEASURE_LAYOUTS: readonly MeasureScreenLayout[] = [];
 const EMPTY_EVENT_LAYOUTS: readonly EventScreenLayout[] = [];
+const EMPTY_STAFF_HIT_LAYOUTS: readonly StaffMeasureHitLayout[] = [];
 const LIVE_LIMIT_LABELS: Record<keyof typeof LIVE_ENGRAVING_LIMITS, string> = {
   measures: "measures",
   rows: "staff rows",
@@ -343,6 +388,9 @@ export function ScoreRenderer({
   selectedEventId = null,
   inputFollowRevision = 0,
   onSelectEvent,
+  noteEntryMethod = "duration-letter",
+  onShiftInputPitch,
+  onPointerNoteIntent,
 }: ScoreRendererProps) {
   const frameRef = useRef<HTMLDivElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
@@ -353,9 +401,11 @@ export function ScoreRenderer({
     source: null,
     measureLayouts: [],
     eventLayouts: [],
+    staffHitLayouts: [],
     error: "",
   });
   const [renderAttempt, setRenderAttempt] = useState(0);
+  const [pointerNotePreview, setPointerNotePreview] = useState<PointerNotePreview | null>(null);
   const engravingPlan = useMemo(
     () => planLiveEngraving(score, viewMode, selectedPartId),
     [score, selectedPartId, viewMode],
@@ -382,6 +432,7 @@ export function ScoreRenderer({
   const layoutsAreCurrent = engravingState.source === engravingSource;
   const measureLayouts = layoutsAreCurrent ? engravingState.measureLayouts : EMPTY_MEASURE_LAYOUTS;
   const eventLayouts = layoutsAreCurrent ? engravingState.eventLayouts : EMPTY_EVENT_LAYOUTS;
+  const staffHitLayouts = layoutsAreCurrent ? engravingState.staffHitLayouts : EMPTY_STAFF_HIT_LAYOUTS;
   const renderError = layoutsAreCurrent ? engravingState.error : "";
 
   useEffect(() => {
@@ -419,13 +470,13 @@ export function ScoreRenderer({
       host.replaceChildren();
       if (interactiveRenderBlocked) {
         if (!disposed && requestId === engravingRequestRef.current && hostRef.current === host) {
-          setEngravingState({ source: engravingSource, measureLayouts: [], eventLayouts: [], error: "" });
+          setEngravingState({ source: engravingSource, measureLayouts: [], eventLayouts: [], staffHitLayouts: [], error: "" });
         }
         return;
       }
       if (!rows.length) {
         if (!disposed && requestId === engravingRequestRef.current && hostRef.current === host) {
-          setEngravingState({ source: engravingSource, measureLayouts: [], eventLayouts: [], error: "" });
+          setEngravingState({ source: engravingSource, measureLayouts: [], eventLayouts: [], staffHitLayouts: [], error: "" });
         }
         return;
       }
@@ -444,6 +495,7 @@ export function ScoreRenderer({
         const absoluteIndex = new Map(score.measureOrder.map((measureId, index) => [measureId, index]));
         const nextMeasureLayouts: MeasureScreenLayout[] = [];
         const nextEventLayouts: EventScreenLayout[] = [];
+        const nextStaffHitLayouts: StaffMeasureHitLayout[] = [];
 
         systems.forEach((system, systemIndex) => {
           const yBase = TOP_PADDING + systemIndex * systemHeight;
@@ -619,6 +671,20 @@ export function ScoreRenderer({
               tickAnchors,
             });
             cells.forEach((cell) => {
+              nextStaffHitLayouts.push({
+                partId: cell.row.part.id,
+                staffId: cell.row.staff.id,
+                measureId,
+                systemIndex,
+                startX: rhythmicStartX,
+                endX: noteEndX,
+                topLineY: cell.stave.getYForLine(0),
+                bottomLineY: cell.stave.getYForLine(4),
+                lineSpacing: cell.stave.getSpacingBetweenLines(),
+                clef: cell.row.staff.clef,
+              });
+            });
+            cells.forEach((cell) => {
               cell.voice.draw(context, cell.stave);
               cell.dynamicsVoice?.draw(context, cell.stave);
               cell.beams.forEach((beam) => beam.setContext(context).draw());
@@ -662,6 +728,7 @@ export function ScoreRenderer({
             source: engravingSource,
             measureLayouts: nextMeasureLayouts,
             eventLayouts: nextEventLayouts,
+            staffHitLayouts: nextStaffHitLayouts,
             error: "",
           });
         }
@@ -672,6 +739,7 @@ export function ScoreRenderer({
           source: engravingSource,
           measureLayouts: [],
           eventLayouts: [],
+          staffHitLayouts: [],
           error: error instanceof Error ? error.message : "The score could not be engraved.",
         });
       }
@@ -682,16 +750,22 @@ export function ScoreRenderer({
 
   const handleClick = (event: React.MouseEvent<HTMLElement>) => {
     if (!rows.length || !layoutsAreCurrent) return;
+    if (noteEntryMethod === "score-pointer" && event.detail === 0) return;
     const rect = event.currentTarget.getBoundingClientRect();
-    const localX = (event.clientX - rect.left) / scale;
-    const localY = (event.clientY - rect.top) / scale;
+    const renderedScaleX = event.currentTarget.offsetWidth > 0 ? rect.width / event.currentTarget.offsetWidth : scale;
+    const renderedScaleY = event.currentTarget.offsetHeight > 0 ? rect.height / event.currentTarget.offsetHeight : scale;
+    const localX = (event.clientX - rect.left) / renderedScaleX;
+    const localY = (event.clientY - rect.top) / renderedScaleY;
+    const directSelectionRadius = noteEntryMethod === "score-pointer"
+      ? 12 / Math.min(renderedScaleX, renderedScaleY)
+      : 0;
     const directHit = eventLayouts
       .map((layout) => ({
         layout,
         distance: pointToRectDistance(localX, localY, layout),
         centerDistance: pointToRectCenterDistance(localX, localY, layout),
       }))
-      .filter(({ distance }) => distance === 0)
+      .filter(({ distance }) => distance <= directSelectionRadius)
       .sort((left, right) => left.centerDistance - right.centerDistance)[0]?.layout;
     if (directHit) {
       onSelectPart(directHit.partId);
@@ -701,6 +775,52 @@ export function ScoreRenderer({
         staffId: directHit.staffId,
         measureId: directHit.measureId,
         eventId: directHit.eventId,
+      });
+      return;
+    }
+
+    if (noteEntryMethod === "score-pointer") {
+      const screenPaddingX = 4 / renderedScaleX;
+      const screenPaddingY = 24 / renderedScaleY;
+      const pointerLayout = staffHitLayouts
+        .filter((layout) => (
+          localX >= layout.startX + screenPaddingX
+          && localX <= layout.endX - screenPaddingX
+          && localY >= layout.topLineY - screenPaddingY
+          && localY <= layout.bottomLineY + screenPaddingY
+        ))
+        .map((layout) => ({
+          layout,
+          distance: Math.abs(localY - (layout.topLineY + layout.bottomLineY) / 2),
+        }))
+        .sort((left, right) => left.distance - right.distance)[0]?.layout;
+      if (!pointerLayout) return;
+      onSelectPart(pointerLayout.partId);
+      onSelectStaff?.(pointerLayout.staffId);
+      const pitch = pitchFromStaffPointer(
+        pointerLayout.clef,
+        localY,
+        pointerLayout.bottomLineY,
+        pointerLayout.lineSpacing,
+      );
+      if (!pitch) {
+        onPointerNoteIntent?.({
+          kind: "unsupported",
+          partId: pointerLayout.partId,
+          staffId: pointerLayout.staffId,
+          measureId: pointerLayout.measureId,
+          clef: pointerLayout.clef,
+        });
+        return;
+      }
+      onPointerNoteIntent?.({
+        kind: "pitch",
+        partId: pointerLayout.partId,
+        staffId: pointerLayout.staffId,
+        measureId: pointerLayout.measureId,
+        step: pitch.step,
+        octave: pitch.octave,
+        addToChord: event.shiftKey,
       });
       return;
     }
@@ -723,7 +843,7 @@ export function ScoreRenderer({
         distance: pointToRectDistance(localX, localY, layout),
         centerDistance: pointToRectCenterDistance(localX, localY, layout),
       }))
-      .filter(({ distance }) => distance <= 22 / scale)
+      .filter(({ distance }) => distance <= 22 / Math.min(renderedScaleX, renderedScaleY))
       .sort((left, right) => left.distance - right.distance || left.centerDistance - right.centerDistance)[0]?.layout;
     onSelectEvent?.(nearest ? {
       partId: nearest.partId,
@@ -731,6 +851,51 @@ export function ScoreRenderer({
       measureId: nearest.measureId,
       eventId: nearest.eventId,
     } : null);
+  };
+
+  const handlePointerMove = (event: React.MouseEvent<HTMLButtonElement>) => {
+    if (noteEntryMethod !== "score-pointer" || !layoutsAreCurrent) {
+      if (pointerNotePreview) setPointerNotePreview(null);
+      return;
+    }
+    const rect = event.currentTarget.getBoundingClientRect();
+    const renderedScaleX = event.currentTarget.offsetWidth > 0 ? rect.width / event.currentTarget.offsetWidth : scale;
+    const renderedScaleY = event.currentTarget.offsetHeight > 0 ? rect.height / event.currentTarget.offsetHeight : scale;
+    const localX = (event.clientX - rect.left) / renderedScaleX;
+    const localY = (event.clientY - rect.top) / renderedScaleY;
+    const selectionHalo = 12 / Math.min(renderedScaleX, renderedScaleY);
+    if (eventLayouts.some((layout) => pointToRectDistance(localX, localY, layout) <= selectionHalo)) {
+      setPointerNotePreview(null);
+      return;
+    }
+    const screenPaddingX = 4 / renderedScaleX;
+    const screenPaddingY = 24 / renderedScaleY;
+    const layout = staffHitLayouts
+      .filter((candidate) => (
+        localX >= candidate.startX + screenPaddingX
+        && localX <= candidate.endX - screenPaddingX
+        && localY >= candidate.topLineY - screenPaddingY
+        && localY <= candidate.bottomLineY + screenPaddingY
+      ))
+      .map((candidate) => ({
+        candidate,
+        distance: Math.abs(localY - (candidate.topLineY + candidate.bottomLineY) / 2),
+      }))
+      .sort((left, right) => left.distance - right.distance)[0]?.candidate;
+    if (!layout) {
+      setPointerNotePreview(null);
+      return;
+    }
+    const pitch = pitchFromStaffPointer(layout.clef, localY, layout.bottomLineY, layout.lineSpacing);
+    const snappedStep = Math.round((layout.bottomLineY - localY) / (layout.lineSpacing / 2));
+    setPointerNotePreview({
+      x: localX,
+      y: layout.bottomLineY - snappedStep * (layout.lineSpacing / 2),
+      label: pitch
+        ? `${pitch.step}${pitch.octave} → m. ${score.measures[layout.measureId]?.number ?? layout.measureId} end`
+        : "Percussion · use buttons",
+      unsupported: !pitch,
+    });
   };
 
   const selectedStaffRow = selectedStaffId ? rows.find((row) => row.staff.id === selectedStaffId) : undefined;
@@ -793,6 +958,16 @@ export function ScoreRenderer({
 
   const handleRowKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
     if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter"].includes(event.key)) return;
+    if (
+      noteEntryMethod === "arrow-duration"
+      && (event.key === "ArrowUp" || event.key === "ArrowDown")
+      && !event.altKey
+    ) {
+      event.preventDefault();
+      event.stopPropagation();
+      onShiftInputPitch?.(event.key === "ArrowUp" ? 1 : -1);
+      return;
+    }
     event.preventDefault();
     event.stopPropagation();
     if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
@@ -843,8 +1018,15 @@ export function ScoreRenderer({
     : selectedEventId
       ? " The selected event is no longer available."
       : " No event selected; input uses the NEXT marker.";
+  const entryMethodGuidance = noteEntryMethod === "arrow-duration"
+    ? "Use the Up and Down Arrow keys to choose a written pitch, then 1 through 7 to enter it. Use Alt with Up or Down to select a staff."
+    : noteEntryMethod === "duration-letter"
+      ? "Use 1 through 7 to choose duration and A through G to enter a written pitch. Use the Up and Down Arrow keys to select a staff."
+      : noteEntryMethod === "score-pointer"
+        ? "Click or tap an empty staff line or space to append that written pitch at the end of the clicked measure. Existing notes and rests remain selectable. In Chord mode, Shift-click adds a tone only when a chord is selected on that staff."
+        : "Use the visible Do through Ti pitch buttons or Rest. Use the Up and Down Arrow keys to select a staff.";
   const scoreControlLabel = keyboardRow
-    ? `${score.metadata.title}. ${countLabel(score.parts.length, "part")}, ${countLabel(score.measureOrder.length, "measure")}. Selected ${keyboardRow.part.name}, staff ${keyboardRow.staffIndex + 1}, ${keyboardRow.staff.clef} clef.${selectedEventContext} Click or tap a note or rest to select it for deletion. Use the Left and Right Arrow keys to select events, the Up and Down Arrow keys to select a staff, and A through G to enter notes.`
+    ? `${score.metadata.title}. ${countLabel(score.parts.length, "part")}, ${countLabel(score.measureOrder.length, "measure")}. Selected ${keyboardRow.part.name}, staff ${keyboardRow.staffIndex + 1}, ${keyboardRow.staff.clef} clef.${selectedEventContext} Click or tap a note or rest to select it for deletion. Use the Left and Right Arrow keys to select events. ${entryMethodGuidance}`
     : `${score.metadata.title}. No editable staff rows.`;
   const engravingPending = !interactiveRenderBlocked && engravingState.source !== engravingSource && !renderError;
   const firstExceeded = engravingPlan.exceeded[0];
@@ -873,6 +1055,13 @@ export function ScoreRenderer({
               aria-hidden="true"
             />
           ) : null}
+          {noteEntryMethod === "score-pointer" && pointerNotePreview ? (
+            <div
+              className={`pointer-note-preview ${pointerNotePreview.unsupported ? "unsupported" : ""}`}
+              style={{ left: pointerNotePreview.x, top: pointerNotePreview.y }}
+              aria-hidden="true"
+            ><span>{pointerNotePreview.label}</span></div>
+          ) : null}
           {entryCursor ? (
             <div className="entry-caret" style={{ left: entryCursor.x, top: entryCursor.top }} aria-hidden="true"><span>NEXT</span></div>
           ) : null}
@@ -884,7 +1073,7 @@ export function ScoreRenderer({
             ><span>{playbackCursor.label}</span></div>
           ) : null}
           <div ref={hostRef} className="vexflow-host" aria-hidden="true" />
-          {!interactiveRenderBlocked ? <button type="button" className="score-hit-target" onClick={handleClick} onKeyDown={handleRowKeyDown} aria-label={scoreControlLabel} /> : null}
+          {!interactiveRenderBlocked ? <button type="button" className={`score-hit-target ${noteEntryMethod === "score-pointer" ? "score-pointer-entry" : ""}`} onClick={handleClick} onMouseMove={handlePointerMove} onMouseLeave={() => setPointerNotePreview(null)} onKeyDown={handleRowKeyDown} aria-label={scoreControlLabel} /> : null}
         </div>
       </div>
       {engravingPlan.kind === "part-fallback" ? (
@@ -902,7 +1091,7 @@ export function ScoreRenderer({
       ) : null}
       {engravingPending ? <div className="engraving-loading" role="status">Preparing notation…</div> : null}
       {renderError ? <div className="engraving-error" role="alert"><span>{renderError}</span><button type="button" onClick={() => {
-        setEngravingState({ source: null, measureLayouts: [], eventLayouts: [], error: "" });
+        setEngravingState({ source: null, measureLayouts: [], eventLayouts: [], staffHitLayouts: [], error: "" });
         setRenderAttempt((attempt) => attempt + 1);
       }}>Retry engraving</button></div> : null}
     </div>

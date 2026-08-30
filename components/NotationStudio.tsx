@@ -35,17 +35,27 @@ import type { KeySignature } from "../lib/music/key-signatures";
 import type { Articulation, DurationBase, DurationValue, DynamicMarking, MusicEvent, PitchStep, ScoreDocument, ScoreNote } from "../lib/music/model";
 import { ARTICULATIONS, DURATION_LABELS, DYNAMIC_MARKINGS, TICKS_PER_QUARTER, durationTicks, eventCount, getPrimaryVoice, nextAugmentationDotCount, pitchName, resolveStaffIndex, validateScore, voiceTicks } from "../lib/music/model";
 import { MAX_MUSICXML_FILE_BYTES, MAX_NATIVE_FILE_BYTES, serializeNativeScore } from "../lib/music/native-format";
+import { SOLFEGE, noteEntryMethodShortLabel, shiftDiatonicPitch } from "../lib/music/note-input";
+import type { DiatonicPitch, NoteEntryMethod } from "../lib/music/note-input";
 import { locatePlaybackPosition } from "../lib/music/playback-position";
-import { addChordTone, addChordToneToEvent, addInstrument, appendEvent, appendMeasure, clearEventToRest, createScore, findEventTargetMeasureId, makeEvent, removeChordToneFromEvent, removeEvent, removeInstrument, removeLastChordTone, removeLastEvent, removeLastMeasure, setEventArticulation, setEventDynamic, setKeyFromMeasure, setLastEventDynamic, setLastNoteArticulation, setTimeFromMeasure, toggleTieLastTwo, updatePart } from "../lib/music/score";
+import { addChordTone, addChordToneToEvent, addInstrument, appendEvent, appendEventToMeasure, appendMeasure, clearEventToRest, createScore, findEventTargetMeasureId, makeEvent, removeChordToneFromEvent, removeEvent, removeInstrument, removeLastChordTone, removeLastEvent, removeLastMeasure, setEventArticulation, setEventDynamic, setKeyFromMeasure, setLastEventDynamic, setLastNoteArticulation, setTimeFromMeasure, toggleTieLastTwo, updatePart } from "../lib/music/score";
 import { loadStoredScore, saveStoredScore } from "../lib/music/storage";
 import { DurationIcon } from "./DurationIcon";
 import { ScoreRenderer } from "./ScoreRenderer";
-import type { ScoreEventSelection } from "./ScoreRenderer";
+import type { ScoreEventSelection, ScorePointerNoteIntent } from "./ScoreRenderer";
 
 type AccidentalMode = "auto" | "sharp" | "flat" | "natural";
 type PendingImport = { score: ScoreDocument; warnings: string[] };
 type StatusTone = "neutral" | "success" | "warning" | "error";
 type HistoryEntry = { score: ScoreDocument; selection: ScoreEventSelection | null };
+type EnterEventOptions = {
+  duration?: DurationBase;
+  octave?: number;
+  partId?: string;
+  staffId?: string;
+  measureId?: string;
+  startNewChord?: boolean;
+};
 
 const DURATION_CHOICES: Array<{ value: DurationBase; shortcut: string }> = [
   { value: 1, shortcut: "1" },
@@ -91,6 +101,28 @@ function dotSelectionStatus(dots: DurationValue["dots"]): string {
 function durationName(base: DurationBase, dots: DurationValue["dots"]): string {
   const prefix = dots === 1 ? "Dotted " : dots === 2 ? "Double-dotted " : "";
   return `${prefix}${DURATION_LABELS[base]}`;
+}
+
+function inputPitchLabel(pitch: DiatonicPitch): string {
+  return `${pitch.step}${pitch.octave} (${SOLFEGE[pitch.step]})`;
+}
+
+function noteEntryInstruction(
+  method: NoteEntryMethod,
+  pitch: DiatonicPitch,
+  base: DurationBase,
+  dots: DurationValue["dots"],
+): string {
+  if (method === "arrow-duration") {
+    return `${noteEntryMethodShortLabel(method)} · ${inputPitchLabel(pitch)} selected · press 1–7 to enter`;
+  }
+  if (method === "duration-letter") {
+    return `${noteEntryMethodShortLabel(method)} · ${durationName(base, dots)} selected · press A–G to enter`;
+  }
+  if (method === "score-pointer") {
+    return `${noteEntryMethodShortLabel(method)} · ${durationName(base, dots)} selected · click a staff line or space to add at that measure's end`;
+  }
+  return `${noteEntryMethodShortLabel(method)} · ${durationName(base, dots)} selected · press 도(C) through 시(B), or Rest`;
 }
 
 function eventName(event: MusicEvent): string {
@@ -209,7 +241,7 @@ function persistScoreLocally(score: ScoreDocument): string {
 
 function statusTone(message: string): StatusTone {
   const normalized = message.toLowerCase();
-  if (/failed|not saved|not applied|not added|invalid|could not|unavailable|larger than|safety limit|required|unexpected/.test(normalized)) return "error";
+  if (/failed|not saved|not applied|not added|invalid|could not|unavailable|no longer available|does not have room|larger than|safety limit|required|unexpected/.test(normalized)) return "error";
   if (/paused|warning|last-known-good|damaged|review/.test(normalized)) return "warning";
   if (/saved locally|ready|recovered your local score/.test(normalized)) return "success";
   return "neutral";
@@ -227,7 +259,9 @@ export function NotationStudio() {
   const [dotCount, setDotCount] = useState<DurationValue["dots"]>(0);
   const [chordMode, setChordMode] = useState(false);
   const [accidentalMode, setAccidentalMode] = useState<AccidentalMode>("auto");
-  const [octave, setOctave] = useState(4);
+  const [noteEntryMethod, setNoteEntryMethod] = useState<NoteEntryMethod>("duration-letter");
+  const [inputPitch, setInputPitch] = useState<DiatonicPitch>({ step: "C", octave: 4 });
+  const octave = inputPitch.octave;
   const [zoom, setZoom] = useState(82);
   const [{ text: status, revision: statusRevision }, setStatus] = useReducer(
     (current: { text: string; revision: number }, text: string) => ({ text, revision: current.revision + 1 }),
@@ -538,9 +572,10 @@ export function NotationStudio() {
     setMobileToolsOpen(next);
     window.requestAnimationFrame(() => {
       if (next) {
+        const inputMethod = notationToolsRef.current?.querySelector<HTMLElement>("#note-entry-method");
         const activeDuration = notationToolsRef.current?.querySelector<HTMLElement>('.note-values button[aria-pressed="true"]');
         const firstControl = notationToolsRef.current?.querySelector<HTMLElement>("button:not([disabled]), select:not([disabled])");
-        (activeDuration ?? firstControl)?.focus();
+        (inputMethod ?? activeDuration ?? firstControl)?.focus();
       } else {
         mobileToolsButtonRef.current?.focus();
       }
@@ -966,23 +1001,50 @@ export function NotationStudio() {
     }
   }, [cancelPlayback, finishPlayback, liveEngravingUnavailable, playing, score, selectedPart, stopPlayback, viewMode]);
 
-  const enterEvent = useCallback((step: PitchStep, forceRest = false) => {
+  const shiftInputPitch = useCallback((delta: -1 | 1) => {
+    const next = shiftDiatonicPitch(inputPitch, delta);
+    setInputPitch(next);
+    setStatus(`${inputPitchLabel(next)} selected · press 1–7 to enter`);
+  }, [inputPitch]);
+
+  const changeInputOctave = useCallback((delta: -1 | 1) => {
+    const next = { ...inputPitch, octave: Math.max(0, Math.min(8, inputPitch.octave + delta)) };
+    setInputPitch(next);
+    setStatus(`${inputPitchLabel(next)} selected`);
+  }, [inputPitch]);
+
+  const chooseNoteEntryMethod = useCallback((method: NoteEntryMethod) => {
+    setNoteEntryMethod(method);
+    setStatus(noteEntryInstruction(method, inputPitch, duration, dotCount));
+  }, [dotCount, duration, inputPitch]);
+
+  const enterEvent = useCallback((step: PitchStep, forceRest = false, options: EnterEventOptions = {}) => {
     if (guardLargeScoreEditing()) return;
-    const part = score.parts.find((candidate) => candidate.id === selectedPartId) ?? score.parts[0];
-    if (!part) return;
-    const staffIndex = resolveStaffIndex(part, selectedStaffId);
-    if (staffIndex < 0) return;
+    const part = options.partId
+      ? score.parts.find((candidate) => candidate.id === options.partId)
+      : score.parts.find((candidate) => candidate.id === selectedPartId) ?? score.parts[0];
+    if (!part) {
+      setStatus("The input target is no longer available.");
+      return;
+    }
+    const staffIndex = resolveStaffIndex(part, options.staffId ?? selectedStaffId);
+    if (staffIndex < 0) {
+      setStatus("The input staff is no longer available.");
+      return;
+    }
     const staffId = part.staves[staffIndex].id;
     const staffNumber = staffIndex + 1;
+    const entryOctave = options.octave ?? octave;
+    const entryDuration = options.duration ?? duration;
     const eventId = `event-${Date.now()}-${eventSequence.current++}`;
     const enteringRest = forceRest;
-    const exactChordTarget = chordMode && !enteringRest
+    const exactChordTarget = chordMode && !options.startNewChord && !enteringRest
       && selectedEvent?.kind === "note"
       && selectedEventTarget?.partId === part.id
       && selectedEventTarget.staffId === staffId
       ? selectedEventTarget
       : null;
-    const latestChordMeasureId = chordMode && !enteringRest && !selectedEventTarget
+    const latestChordMeasureId = chordMode && !options.startNewChord && !enteringRest && !selectedEventTarget
       ? findLastEventMeasureId(score, part.id, staffIndex)
       : null;
     const latestChordEvent = latestChordMeasureId
@@ -994,7 +1056,7 @@ export function NotationStudio() {
       const alter = inputAlter(accidentalMode, entryWrittenKey, step);
       const note: ScoreNote = {
         id: `${eventId}-note-1`,
-        pitch: { step, alter, octave },
+        pitch: { step, alter, octave: entryOctave },
         accidentalDisplay: accidentalMode === "auto" ? "auto" : "force",
       };
       const result = exactChordTarget
@@ -1009,23 +1071,32 @@ export function NotationStudio() {
       const updatedEvent = getPrimaryVoice(updatedPart, result.measureId, updatedStaffIndex).events.find((event) => event.id === result.eventId);
       const noteCount = updatedEvent?.kind === "note" ? updatedEvent.notes.length : 1;
       commit(result.score, `Added ${pitchName(note.pitch)} · Chord · ${countLabel(noteCount, "note")} · staff ${staffNumber}`);
+      setInputPitch({ step, octave: entryOctave });
       setSelectedEventTarget({ partId: part.id, staffId, measureId: result.measureId, eventId: result.eventId });
       requestInputFollow();
       return;
     }
 
-    const durationValue: DurationValue = { base: duration, dots: dotCount };
-    const targetMeasureId = findEventTargetMeasureId(score, part.id, durationValue, staffId) ?? score.measureOrder.at(-1)!;
+    const durationValue: DurationValue = { base: entryDuration, dots: dotCount };
+    const targetMeasureId = options.measureId
+      ?? findEventTargetMeasureId(score, part.id, durationValue, staffId)
+      ?? score.measureOrder.at(-1)!;
+    if (!score.measures[targetMeasureId]) {
+      setStatus("The input measure is no longer available.");
+      return;
+    }
     const entryWrittenKey = writtenKeyForPart(score.measures[targetMeasureId].key, part);
     const alter = inputAlter(accidentalMode, entryWrittenKey, step);
     const event = makeEvent({
       id: eventId,
-      pitch: { step, alter, octave },
+      pitch: { step, alter, octave: entryOctave },
       duration: durationValue,
       rest: enteringRest,
       accidentalDisplay: accidentalMode === "auto" ? "auto" : "force",
     });
-    const result = appendEvent(score, part.id, event, staffId);
+    const result = options.measureId
+      ? appendEventToMeasure(score, part.id, targetMeasureId, event, staffId)
+      : appendEvent(score, part.id, event, staffId);
     if (result.error) setStatus(result.error);
     else {
       const chordStatus = event.kind === "rest" && chordMode ? " · Chord mode ignored for rests" : "";
@@ -1034,13 +1105,38 @@ export function NotationStudio() {
         : chordMode
           ? `Started chord with ${pitchName(event.notes[0].pitch)}`
           : `Entered ${pitchName(event.notes[0].pitch)}`;
-      commit(result.score, `${entryStatus} · ${durationName(duration, dotCount)} · staff ${staffNumber}${chordStatus}`);
+      const measureStatus = result.measureId ? ` · measure ${result.score.measures[result.measureId].number}` : "";
+      commit(result.score, `${entryStatus} · ${durationName(entryDuration, dotCount)} · staff ${staffNumber}${measureStatus}${chordStatus}`);
       if (result.measureId) {
+        if (!enteringRest) setInputPitch({ step, octave: entryOctave });
         setSelectedEventTarget({ partId: part.id, staffId, measureId: result.measureId, eventId: event.id });
         requestInputFollow();
       }
     }
   }, [accidentalMode, chordMode, commit, dotCount, duration, guardLargeScoreEditing, octave, score, selectedEvent, selectedEventTarget, selectedPartId, selectedStaffId, setSelectedEventTarget]);
+
+  const enterPointerNote = useCallback((intent: ScorePointerNoteIntent) => {
+    if (noteEntryMethod !== "score-pointer") return;
+    setSelectedPartId(intent.partId);
+    setSelectedStaffId(intent.staffId);
+    if (intent.kind === "unsupported") {
+      setStatus("Score click input is not available on percussion staves yet — use the visible pitch buttons or switch input method");
+      return;
+    }
+    setInputPitch({ step: intent.step, octave: intent.octave });
+    const addToSelectedChord = intent.addToChord
+      && chordMode
+      && selectedEvent?.kind === "note"
+      && selectedEventTarget?.partId === intent.partId
+      && selectedEventTarget.staffId === intent.staffId;
+    enterEvent(intent.step, false, {
+      partId: intent.partId,
+      staffId: intent.staffId,
+      measureId: intent.measureId,
+      octave: intent.octave,
+      startNewChord: !addToSelectedChord,
+    });
+  }, [chordMode, enterEvent, noteEntryMethod, selectedEvent, selectedEventTarget]);
 
   const toggleTie = useCallback(() => {
     if (guardLargeScoreEditing()) return;
@@ -1273,26 +1369,44 @@ export function NotationStudio() {
       }
       if (event.key.toLowerCase() === "r") { event.preventDefault(); if (!event.repeat) enterEvent("C", true); return; }
       if (event.key.toLowerCase() === "t") { event.preventDefault(); if (!event.repeat) toggleTie(); return; }
-      if (event.key === "ArrowUp") { event.preventDefault(); setOctave((value) => Math.min(8, value + 1)); return; }
-      if (event.key === "ArrowDown") { event.preventDefault(); setOctave((value) => Math.max(0, value - 1)); return; }
+      if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+        event.preventDefault();
+        const delta = event.key === "ArrowUp" ? 1 : -1;
+        if (noteEntryMethod === "arrow-duration") shiftInputPitch(delta);
+        else changeInputOctave(delta);
+        return;
+      }
       const durationIndex = Number(event.key) - 1;
       if (durationIndex >= 0 && durationIndex < DURATION_CHOICES.length) {
         event.preventDefault();
         const nextDuration = DURATION_CHOICES[durationIndex].value;
         setDuration(nextDuration);
-        setStatus(`${DURATION_LABELS[nextDuration]} duration selected`);
+        if (noteEntryMethod === "arrow-duration") {
+          if (!event.repeat) enterEvent(inputPitch.step, false, { duration: nextDuration, octave: inputPitch.octave });
+        } else {
+          setStatus(noteEntryInstruction(noteEntryMethod, inputPitch, nextDuration, dotCount));
+        }
         return;
       }
       const step = event.key.toUpperCase();
       if (["A", "B", "C", "D", "E", "F", "G"].includes(step)) {
         event.preventDefault();
-        if (!event.repeat) enterEvent(step as PitchStep);
+        if (event.repeat) return;
+        if (noteEntryMethod === "duration-letter") enterEvent(step as PitchStep);
+        else if (noteEntryMethod === "arrow-duration") {
+          const next = { step: step as PitchStep, octave: inputPitch.octave };
+          setInputPitch(next);
+          setStatus(`${inputPitchLabel(next)} selected · press 1–7 to enter`);
+        } else {
+          setStatus(noteEntryInstruction(noteEntryMethod, inputPitch, duration, dotCount));
+        }
+        return;
       }
       if (event.key === "?") { event.preventDefault(); openHelpDialog(); }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [activeDialogOpen, dotCount, enterEvent, exportOpen, liveEngravingUnavailable, mobileToolsOpen, openHelpDialog, playScore, redo, removeLatestInput, saveNow, toggleTie, undo]);
+  }, [activeDialogOpen, changeInputOctave, dotCount, duration, enterEvent, exportOpen, inputPitch, liveEngravingUnavailable, mobileToolsOpen, noteEntryMethod, openHelpDialog, playScore, redo, removeLatestInput, saveNow, shiftInputPitch, toggleTie, undo]);
 
   useEffect(() => () => {
     if (playbackFrameRef.current !== null) window.cancelAnimationFrame(playbackFrameRef.current);
@@ -1609,11 +1723,28 @@ export function NotationStudio() {
       </header>
 
       <section ref={notationToolsRef} id="notation-tools" className={`note-toolbar ${mobileToolsOpen ? "mobile-tools-open" : ""}`} aria-label="Notation tools">
-        <div className="tool-section mode-section" role="group" aria-label="Input mode">
-          <span className="toolbar-label">INPUT</span>
+        <div className="input-method-section">
+          <label htmlFor="note-entry-method"><span className="toolbar-label">INPUT METHOD</span>
+            <select
+              id="note-entry-method"
+              value={noteEntryMethod}
+              aria-label="Note input method"
+              aria-describedby="note-entry-method-help"
+              onChange={(event) => chooseNoteEntryMethod(event.target.value as NoteEntryMethod)}
+            >
+              <option value="arrow-duration">1 · ↑↓ pitch → 1–7 enter</option>
+              <option value="duration-letter">2 · 1–7 duration → A–G enter</option>
+              <option value="score-pointer">3 · Score click / tap</option>
+              <option value="buttons">4 · 도–시 buttons / touch</option>
+            </select>
+          </label>
+          <small id="note-entry-method-help">{noteEntryInstruction(noteEntryMethod, inputPitch, duration, dotCount)}</small>
+        </div>
+        <div className="tool-section mode-section" role="group" aria-label="Note or chord behavior">
+          <span className="toolbar-label">VOICE</span>
           <button className={`mode-pill ${!chordMode ? "active" : ""}`} onClick={() => {
             setChordMode(false);
-            setStatus("Note mode on — A–G enters new notes");
+            setStatus("Note mode on — the next pitch input starts a new note");
           }} aria-pressed={!chordMode}>Note</button>
           <button
             className={`mode-pill ${chordMode ? "active" : ""}`}
@@ -1621,10 +1752,10 @@ export function NotationStudio() {
               const next = !chordMode;
               setChordMode(next);
               setStatus(next
-                ? selectedEvent?.kind === "note" ? "Chord mode on — A–G adds to the selected note" : lastEvent?.kind === "note" ? "Chord mode on — A–G adds to the latest note" : "Chord mode on — A–G starts a new chord"
-                : "Chord mode off — A–G enters new notes");
+                ? selectedEvent?.kind === "note" ? "Chord mode on — the next pitch adds to the selected note" : lastEvent?.kind === "note" ? "Chord mode on — the next pitch adds to the latest note" : "Chord mode on — the next pitch starts a new chord"
+                : "Chord mode off — the next pitch starts a new note");
             }}
-            aria-label={`Chord mode. ${selectedEvent?.kind === "note" ? "Add A through G to the selected note event" : lastEvent?.kind === "note" ? "Add A through G to the latest note event" : "Start a chord with A through G"}`}
+            aria-label={`Chord mode. ${selectedEvent?.kind === "note" ? "Add the next pitch to the selected note event" : lastEvent?.kind === "note" ? "Add the next pitch to the latest note event" : "Start a chord with the next pitch"}`}
             aria-pressed={chordMode}
           >Chord</button>
         </div>
@@ -1633,7 +1764,7 @@ export function NotationStudio() {
             const previewAlter = inputAlter(accidentalMode, previewWrittenKey, step);
             const suffix = previewAlter === 0 && accidentalMode === "auto" ? "" : accidentalGlyph(previewAlter);
             const action = canAddChordTone ? `Add to the ${chordActionTarget}` : chordMode ? "Start a chord with" : "Enter";
-            return <button key={step} disabled={largeScoreEditingPaused} onClick={() => enterEvent(step)} aria-label={`${action} ${step}${suffix}${octave}, ${accidentalMode} accidental mode`}><span>{step}{suffix}{octave}</span><kbd>{step}</kbd></button>;
+            return <button className={inputPitch.step === step ? "pitch-current" : ""} key={step} disabled={largeScoreEditingPaused} onClick={() => enterEvent(step)} aria-label={`${action} ${step}${suffix}${octave}, ${SOLFEGE[step]}, ${accidentalMode} accidental mode`}><span className="pitch-name"><strong>{SOLFEGE[step]}</strong><small>{step}{suffix}{octave}</small></span><kbd>{step}</kbd></button>;
           })}
           <button className="rest-key" disabled={largeScoreEditingPaused} onClick={() => enterEvent("C", true)} aria-label={chordMode ? "Enter a rest; chord mode is ignored for rests" : "Enter a rest"}><span>Rest</span><kbd>R</kbd></button>
         </div>
@@ -1649,9 +1780,15 @@ export function NotationStudio() {
               key={choice.value}
               onClick={() => {
                 setDuration(choice.value);
-                setStatus(`${DURATION_LABELS[choice.value]} duration selected`);
+                if (noteEntryMethod === "arrow-duration") {
+                  enterEvent(inputPitch.step, false, { duration: choice.value, octave: inputPitch.octave });
+                } else {
+                  setStatus(noteEntryInstruction(noteEntryMethod, inputPitch, choice.value, dotCount));
+                }
               }}
-              aria-label={`${DURATION_LABELS[choice.value]} note, shortcut ${choice.shortcut}`}
+              aria-label={noteEntryMethod === "arrow-duration"
+                ? `${DURATION_LABELS[choice.value]} note. Enter ${inputPitchLabel(inputPitch)}, shortcut ${choice.shortcut}`
+                : `${DURATION_LABELS[choice.value]} note, shortcut ${choice.shortcut}`}
               aria-pressed={duration === choice.value}
             >
               <DurationIcon value={choice.value} /><kbd>{choice.shortcut}</kbd>
@@ -1677,7 +1814,7 @@ export function NotationStudio() {
           >{dotCount === 2 ? "··" : "·"}<kbd>.</kbd></button>
           <button className="tool-button tie-tool" disabled={largeScoreEditingPaused} onClick={toggleTie} aria-label="Tie the last two matching notes">⌒<kbd>T</kbd></button>
         </div>
-        <div className="octave-control"><button onClick={() => setOctave(Math.max(0, octave - 1))} aria-label="Lower octave">−</button><span><small>OCTAVE</small>{octave}</span><button onClick={() => setOctave(Math.min(8, octave + 1))} aria-label="Raise octave">＋</button></div>
+        <div className="octave-control"><button onClick={() => changeInputOctave(-1)} aria-label="Lower octave">−</button><span><small>OCTAVE</small>{octave}</span><button onClick={() => changeInputOctave(1)} aria-label="Raise octave">＋</button></div>
         <div className="toolbar-spacer" />
         <div className="zoom-control"><button onClick={() => { autoZoomRef.current = false; setZoom(Math.max(75, zoom - 10)); }} aria-label="Zoom out"><Minus size={13} /></button><span>{zoom}%</span><button onClick={() => { autoZoomRef.current = false; setZoom(Math.min(150, zoom + 10)); }} aria-label="Zoom in"><Plus size={13} /></button></div>
       </section>
@@ -1685,7 +1822,7 @@ export function NotationStudio() {
       <section className="mobile-input-dock" aria-label="Quick notation input">
         <div className="mobile-input-meta">
           <button ref={mobileToolsButtonRef} className="mobile-tools-button" onClick={toggleMobileTools} aria-label={mobileToolsOpen ? "Close notation settings" : "Open notation settings"} aria-controls="notation-tools" aria-expanded={mobileToolsOpen}>
-            <span><strong>{inputTargetLabel}</strong><small>{durationName(duration, dotCount)} · Oct {octave} · {chordMode ? "Chord" : "Note"}</small></span>
+            <span><strong>{inputTargetLabel}</strong><small>{noteEntryMethodShortLabel(noteEntryMethod)} · {durationName(duration, dotCount)} · {inputPitch.step}{octave} · {chordMode ? "Chord" : "Note"}</small></span>
             <ChevronDown className={mobileToolsOpen ? "open" : ""} size={15} aria-hidden="true" />
           </button>
           <button className="mobile-rest-meta" disabled={largeScoreEditingPaused} onClick={() => enterEvent("C", true)} aria-label="Enter a rest">Rest</button>
@@ -1698,7 +1835,7 @@ export function NotationStudio() {
             const previewAlter = inputAlter(accidentalMode, previewWrittenKey, step);
             const suffix = previewAlter === 0 && accidentalMode === "auto" ? "" : accidentalGlyph(previewAlter);
             const action = canAddChordTone ? `Add to the ${chordActionTarget}` : chordMode ? "Start a chord with" : "Enter";
-            return <button key={step} disabled={largeScoreEditingPaused} onClick={() => enterEvent(step)} aria-label={`${action} ${step}${suffix}${octave}`}><span>{step}{suffix}</span><small>{octave}</small></button>;
+            return <button className={inputPitch.step === step ? "pitch-current" : ""} key={step} disabled={largeScoreEditingPaused} onClick={() => enterEvent(step)} aria-label={`${action} ${step}${suffix}${octave}, ${SOLFEGE[step]}`}><span>{SOLFEGE[step]}</span><small>{step}{suffix}{octave}</small></button>;
           })}
           <button className="mobile-rest-key" disabled={largeScoreEditingPaused} onClick={() => enterEvent("C", true)} aria-label="Enter a rest">Rest</button>
         </div>
@@ -1738,7 +1875,13 @@ export function NotationStudio() {
             </span>
             {largeScoreEditingPaused ? <span className="large-score-editing-notice" role="status">Large score · editing paused for responsiveness · save and export remain available</span> : null}
             {selectedEvent && selectedEventTarget ? <span className="selected-event-summary">Selected · m. {score.measures[selectedEventTarget.measureId].number} · {eventName(selectedEvent)} · {deleteRemovesChordTone ? "Delete removes its last tone" : selectedEvent.kind === "note" ? "Delete clears to rest · rhythm kept" : "Delete removes time"}</span> : null}
-            <span className="canvas-hint"><kbd>A–G</kbd> pitch <kbd>R</kbd> rest <kbd>⌫</kbd> delete <kbd>Space</kbd> play</span>
+            <span className="canvas-hint">
+              {noteEntryMethod === "arrow-duration" ? <><kbd>↑ ↓</kbd> pitch <kbd>1–7</kbd> enter</>
+                : noteEntryMethod === "duration-letter" ? <><kbd>1–7</kbd> duration <kbd>A–G</kbd> enter</>
+                  : noteEntryMethod === "score-pointer" ? <>Click a line or space · add at clicked measure end</>
+                    : <>Use <strong>도(C)–시(B)</strong> buttons</>}
+              {" "}<kbd>R</kbd> rest <kbd>⌫</kbd> delete <kbd>Space</kbd> play
+            </span>
           </div>
           <article className="score-page">
             <div className="score-heading"><p>{score.metadata.subtitle.toUpperCase()}</p><h1>{score.metadata.title}</h1><span>{score.metadata.composer}</span></div>
@@ -1756,6 +1899,9 @@ export function NotationStudio() {
               onSelectEvent={selectRenderedEvent}
               onSelectPart={selectPart}
               onSelectStaff={selectStaff}
+              noteEntryMethod={noteEntryMethod}
+              onShiftInputPitch={shiftInputPitch}
+              onPointerNoteIntent={enterPointerNote}
             />
             <span className="page-number" aria-hidden="true">1</span>
           </article>
@@ -1877,7 +2023,12 @@ export function NotationStudio() {
               <button className="danger-link" onClick={() => { if (guardLargeScoreEditing()) return; const next = removeInstrument(score, selectedPart.id); const selection = safeSelection(next); setSelectedEventTarget(null); setSelectedPartId(selection.partId); setSelectedStaffId(selection.staffId); commit(next, `Removed ${selectedPart.name}`); }} disabled={largeScoreEditingPaused || score.parts.length <= 1}><Trash2 size={13} /> Remove part</button>
             </div>
           ) : null}
-          <div className="shortcut-card"><span>QUICK INPUT</span><p><kbd>1–7</kbd> duration <kbd>.</kbd> 0–2 dots</p><p><kbd>A–G</kbd> pitch <kbd>R</kbd> rest</p><p><kbd>← →</kbd> select event <kbd>⌫</kbd> delete</p><p><kbd>↑ ↓</kbd> octave <kbd>Space</kbd> play</p><button onClick={openHelpDialog}>View all shortcuts <ChevronDown size={12} /></button></div>
+          <div className="shortcut-card"><span>{noteEntryMethodShortLabel(noteEntryMethod).toUpperCase()}</span>
+            {noteEntryMethod === "arrow-duration" ? <p><kbd>↑ ↓</kbd> choose {inputPitchLabel(inputPitch)} <kbd>1–7</kbd> enter</p>
+              : noteEntryMethod === "duration-letter" ? <p><kbd>1–7</kbd> duration <kbd>A–G</kbd> enter pitch</p>
+                : noteEntryMethod === "score-pointer" ? <p>Click a blank staff line or space to add at that measure&apos;s end</p>
+                  : <p>Press the visible 도(C)–시(B) or Rest buttons</p>}
+            <p><kbd>.</kbd> 0–2 dots <kbd>R</kbd> rest</p><p><kbd>← →</kbd> select event <kbd>⌫</kbd> delete</p><p>{noteEntryMethod === "arrow-duration" ? <><kbd>Alt ↑ ↓</kbd> staff</> : <><kbd>↑ ↓</kbd> octave / staff</>} <kbd>Space</kbd> play</p><button onClick={openHelpDialog}>View all input methods <ChevronDown size={12} /></button></div>
         </aside>
       </div>
 
@@ -1921,7 +2072,7 @@ export function NotationStudio() {
       {helpOpen ? (
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setHelpOpen(false); }}>
           <section ref={activeDialogRef} tabIndex={-1} className="modal help-modal" role="dialog" aria-modal="true" aria-labelledby="shortcut-title"><header><div><span className="eyebrow">KEYBOARD FIRST</span><h2 id="shortcut-title">Compose without leaving the score</h2><p>Shortcuts are ignored while you type in a text field.</p></div><button className="icon-button" onClick={() => setHelpOpen(false)} aria-label="Close"><X size={18} /></button></header>
-            <div className="shortcut-grid"><div><span>Notes</span><p><kbd>A–G</kbd> Enter written pitch</p><p><strong>Chord</strong> Add pitches to the selected note, or the latest note when nothing is selected</p><p><kbd>R</kbd> Enter a rest</p><p><kbd>T</kbd> Tie matching notes</p><p><kbd>←</kbd><kbd>→</kbd> Select events while the score is focused</p><p><kbd>↑</kbd><kbd>↓</kbd> Change octave; on the score, select a staff</p><p><kbd>⌫</kbd> Clear a selected note to a rest; delete a selected rest or the previous input</p><p><kbd>⇧ ⌫</kbd> Remove selected rhythmic time and shift later events earlier</p><p><strong>Chord</strong> Delete removes the selected or latest note&apos;s last chord tone first</p></div><div><span>Rhythm</span><p><kbd>1–7</kbd> Whole → sixty-fourth</p><p><kbd>.</kbd> Cycle 0 → 1 → 2 dots</p></div><div><span>Project</span><p><kbd>⌘ Z</kbd> Undo</p><p><kbd>⌘ ⇧ Z</kbd> Redo</p><p><kbd>⌘ S</kbd> Save locally</p><p><kbd>⌘ P</kbd> Print / PDF</p></div><div><span>Playback</span><p><kbd>Space</kbd> Play / stop</p><p><kbd>?</kbd> This guide</p></div></div>
+            <div className="shortcut-grid"><div><span>Four input methods</span><p><strong>1 · Arrow → number</strong><br /><kbd>↑</kbd><kbd>↓</kbd> chooses one staff step at a time; <kbd>1–7</kbd> enters the selected pitch and duration. <kbd>Alt ↑ ↓</kbd> changes staff while the score is focused.</p><p><strong>2 · Number → letter</strong><br /><kbd>1–7</kbd> chooses duration; <kbd>A–G</kbd> enters the written pitch.</p><p><strong>3 · Score click / tap</strong><br />Choose duration, then click a blank staff line or space. Garak appends the pitch at the end of that clicked measure; clicking an existing event selects it. In Chord mode, hold Shift while clicking to add a tone to the selected chord.</p><p><strong>4 · Buttons / touch</strong><br />Use 도(C), 레(D), 미(E), 파(F), 솔(G), 라(A), 시(B), or Rest.</p></div><div><span>Notes & rhythm</span><p><strong>Fixed-do map</strong> 도=C · 레=D · 미=E · 파=F · 솔=G · 라=A · 시=B</p><p><kbd>1–7</kbd> Whole → sixty-fourth</p><p><kbd>.</kbd> Cycle 0 → 1 → 2 dots</p><p><kbd>R</kbd> Enter a rest</p><p><kbd>T</kbd> Tie matching notes</p><p><strong>Chord</strong> Add pitches to the selected note, or the latest note when nothing is selected</p></div><div><span>Select & edit</span><p><kbd>←</kbd><kbd>→</kbd> Select events while the score is focused</p><p><kbd>⌫</kbd> Clear a selected note to a rest; delete a selected rest or the previous input</p><p><kbd>⇧ ⌫</kbd> Remove selected rhythmic time and shift later events earlier</p><p><strong>Chord</strong> Delete removes the selected or latest note&apos;s last chord tone first</p><p><kbd>⌘ Z</kbd> Undo · <kbd>⌘ ⇧ Z</kbd> Redo</p></div><div><span>Project & playback</span><p><kbd>⌘ S</kbd> Save locally</p><p><kbd>⌘ P</kbd> Print / PDF</p><p><kbd>Space</kbd> Play / stop</p><p><kbd>?</kbd> This guide</p></div></div>
             <footer><CircleHelp size={15} /><span>This alpha supports one voice per staff. Tuplets, multi-voice editing, and linked-part layout follow in the roadmap. <Link href="/licenses" target="_blank" rel="noopener noreferrer">Third-party licenses<span className="visually-hidden"> (opens in a new tab)</span></Link></span></footer>
           </section>
         </div>

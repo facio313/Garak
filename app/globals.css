@@ -89,6 +89,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, a[href]:focus-v
 .note-toolbar { position: relative; z-index: 20; height: var(--toolbar-height); display: flex; align-items: center; gap: 9px; overflow-x: auto; overflow-y: hidden; padding: 0 13px; border-bottom: 1px solid var(--line); background: #f8f7f4; box-shadow: 0 1px 4px rgba(42,39,33,.04); scrollbar-width: thin; scrollbar-color: #8f918d transparent; }
 .note-toolbar::-webkit-scrollbar { display: block; height: 5px; }
 .note-toolbar::-webkit-scrollbar-thumb { border-radius: 5px; background: #aaa59b; }
+.input-method-section { width: 250px; min-width: 250px; height: 54px; display: grid; grid-template-rows: 34px 14px; align-content: center; gap: 1px; padding-right: 10px; border-right: 1px solid #d5d6d1; }
+.input-method-section label { min-width: 0; display: flex; align-items: center; gap: 6px; }
+.input-method-section label>.toolbar-label { flex: 0 0 auto; }
+.input-method-section select { min-width: 0; height: 34px; flex: 1 1 auto; border: 1px solid #bfc9cc; border-radius: 7px; background: white; padding: 0 27px 0 8px; color: var(--blue-deep); font-size: 11px; font-weight: 700; }
+.input-method-section>small { display: block; overflow: hidden; padding-left: 1px; color: var(--muted); font-size: 8px; line-height: 14px; text-overflow: ellipsis; white-space: nowrap; }
 .tool-section, .tool-group { height: 44px; display: flex; align-items: center; gap: 3px; padding-right: 10px; border-right: 1px solid #d5d6d1; }
 .mode-section { gap: 2px; }
 .toolbar-label { margin-right: 4px; color: var(--muted); font-size: 10px; font-weight: 800; letter-spacing: .11em; }
@@ -112,8 +117,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, a[href]:focus-v
 .octave-control span { min-width: 42px; display: grid; place-items: center; font-family: var(--font-geist-mono, monospace); font-size: 12px; }
 .octave-control small { color: var(--muted); font-family: var(--font-geist-sans, Arial); font-size: 8px; font-weight: 800; letter-spacing: .09em; }
 .pitch-keys { display: flex; align-items: center; gap: 3px; }
-.pitch-keys button { position: relative; min-width: 42px; height: 42px; display: grid; place-items: center; border: 1px solid #d3d4cf; border-radius: 7px; background: white; font-family: Georgia, serif; font-size: 12px; }
+.pitch-keys button { position: relative; min-width: 46px; height: 42px; display: grid; place-items: center; border: 1px solid #d3d4cf; border-radius: 7px; background: white; font-family: Georgia, serif; font-size: 12px; }
 .pitch-keys button:hover { border-color: #aebec5; background: #f3f7f8; }
+.pitch-keys button.pitch-current, .mobile-pitch-keys button.pitch-current { border-color: var(--blue); background: var(--blue-soft); color: var(--blue-deep); box-shadow: inset 0 0 0 1px rgba(33,95,120,.08); }
+.pitch-name { display: grid; place-items: center; line-height: 1; }
+.pitch-name strong { font-size: 13px; font-weight: 700; }
+.pitch-name small { margin-top: 3px; color: var(--muted); font-family: var(--font-geist-mono, monospace); font-size: 8px; }
 .pitch-keys button kbd { position: absolute; right: 2px; bottom: 1px; min-width: 13px; height: 13px; border: 0; background: transparent; color: var(--muted); font-family: var(--font-geist-mono, monospace); font-size: 8px; }
 .pitch-keys .rest-key { min-width: 54px; font-family: var(--font-geist-sans, Arial); font-size: 11px; }
 .quick-edit-group { gap: 4px; }
@@ -177,8 +186,13 @@ kbd { display: inline-grid; min-width: 20px; height: 19px; place-items: center; 
 .vexflow-host { position: relative; z-index: 2; cursor: crosshair; }
 .vexflow-host svg { display: block; overflow: visible; }
 .score-hit-target { position: absolute; inset: 0; z-index: 4; width: 100%; height: 100%; border: 0; background: transparent; cursor: crosshair; }
+.score-hit-target.score-pointer-entry { cursor: cell; }
 .staff-selection { position: absolute; left: 0; right: 0; z-index: 1; border-radius: calc(4px * var(--engraving-ui-scale,1)); background: rgba(33,95,120,.09); box-shadow: inset calc(4px * var(--engraving-ui-scale,1)) 0 0 rgba(33,95,120,.65); pointer-events: none; }
 .event-selection { position: absolute; z-index: 3; border: calc(2px * var(--engraving-ui-scale,1)) solid var(--blue); border-radius: calc(8px * var(--engraving-ui-scale,1)); background: rgba(33,95,120,.09); box-shadow: 0 0 0 calc(3px * var(--engraving-ui-scale,1)) rgba(255,253,248,.78), 0 0 0 calc(5px * var(--engraving-ui-scale,1)) rgba(33,95,120,.13); pointer-events: none; }
+.pointer-note-preview { position: absolute; z-index: 7; width: 14px; height: 9px; translate: -50% -50%; rotate: -12deg; border: calc(1.5px * var(--engraving-ui-scale,1)) solid var(--blue); border-radius: 50%; background: rgba(228,238,241,.72); box-shadow: 0 0 0 calc(3px * var(--engraving-ui-scale,1)) rgba(255,253,248,.8); pointer-events: none; }
+.pointer-note-preview>span { position: absolute; left: calc(10px * var(--engraving-ui-scale,1)); bottom: calc(9px * var(--engraving-ui-scale,1)); width: max-content; max-width: calc(180px * var(--engraving-ui-scale,1)); rotate: 12deg; border: calc(1px * var(--engraving-ui-scale,1)) solid #b8cbd2; border-radius: calc(5px * var(--engraving-ui-scale,1)); background: rgba(255,253,248,.96); padding: calc(3px * var(--engraving-ui-scale,1)) calc(5px * var(--engraving-ui-scale,1)); color: var(--blue-deep); font-family: var(--font-geist-sans,Arial); font-size: calc(10px * var(--engraving-ui-scale,1)); font-weight: 750; line-height: 1.2; box-shadow: 0 calc(2px * var(--engraving-ui-scale,1)) calc(8px * var(--engraving-ui-scale,1)) rgba(35,31,25,.12); }
+.pointer-note-preview.unsupported { border-style: dashed; border-color: var(--danger); background: rgba(255,242,241,.76); }
+.pointer-note-preview.unsupported>span { border-color: #d7aaa6; color: var(--danger); }
 .engraving-loading { position: absolute; top: 18px; left: 50%; z-index: 8; translate: -50% 0; border: 1px solid #cbd9de; border-radius: 999px; background: rgba(255,253,248,.96); padding: 7px 11px; color: var(--blue-deep); font-size: 10px; font-weight: 700; box-shadow: 0 4px 15px rgba(44,40,33,.1); }
 .engraving-error { position: absolute; inset: 20px; z-index: 9; display: flex; align-items: center; justify-content: center; align-content: center; flex-wrap: wrap; gap: 10px; border: 1px solid #d3a19d; border-radius: 7px; background: #fff2f1; padding: 12px; color: #8a3732; font-size: 10px; text-align: center; }
 .engraving-error button { min-height: 36px; flex: 0 0 auto; border: 1px solid currentColor; border-radius: 7px; background: white; padding: 0 10px; color: inherit; font-size: 10px; font-weight: 700; }
@@ -285,6 +299,7 @@ kbd { display: inline-grid; min-width: 20px; height: 19px; place-items: center; 
   .note-toolbar { gap: 6px; padding-inline: 8px; }
   .note-toolbar .tool-section, .note-toolbar .tool-group { padding-right: 7px; }
   .note-toolbar .toolbar-label { display: none; }
+  .note-toolbar .input-method-section { width: 225px; min-width: 225px; padding-right: 7px; }
   .note-toolbar .mode-pill { padding-inline: 7px; }
   .note-toolbar .pitch-keys button { min-width: 40px; }
   .note-toolbar .tool-button { width: 40px; }
@@ -346,12 +361,16 @@ kbd { display: inline-grid; min-width: 20px; height: 19px; place-items: center; 
   .note-toolbar { display: none; }
   .note-toolbar.mobile-tools-open { position: fixed; right: 0; bottom: calc(var(--mobile-dock-height) + env(safe-area-inset-bottom)); left: 0; z-index: 68; height: var(--toolbar-height); display: flex; border-top: 1px solid var(--line); box-shadow: 0 -10px 30px rgba(32,33,31,.16); }
   .note-toolbar.mobile-tools-open .pitch-keys, .note-toolbar.mobile-tools-open .quick-edit-group, .note-toolbar.mobile-tools-open .toolbar-spacer { display: none; }
-  .note-toolbar.mobile-tools-open .note-values { order: 1; }
-  .note-toolbar.mobile-tools-open .accidental-input-group { order: 2; }
-  .note-toolbar.mobile-tools-open .rhythm-modifier-group { order: 3; }
-  .note-toolbar.mobile-tools-open .octave-control { order: 4; }
-  .note-toolbar.mobile-tools-open .mode-section { order: 5; }
-  .note-toolbar.mobile-tools-open .zoom-control { order: 6; }
+  .note-toolbar.mobile-tools-open .input-method-section { width: 264px; min-width: 264px; height: 46px; grid-template-rows: 44px; order: 1; padding-right: 8px; }
+  .note-toolbar.mobile-tools-open .input-method-section .toolbar-label { display: none; }
+  .note-toolbar.mobile-tools-open .input-method-section select { height: 44px; font-size: 16px; }
+  .note-toolbar.mobile-tools-open .input-method-section>small { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+  .note-toolbar.mobile-tools-open .note-values { order: 2; }
+  .note-toolbar.mobile-tools-open .accidental-input-group { order: 3; }
+  .note-toolbar.mobile-tools-open .rhythm-modifier-group { order: 4; }
+  .note-toolbar.mobile-tools-open .octave-control { order: 5; }
+  .note-toolbar.mobile-tools-open .mode-section { order: 6; }
+  .note-toolbar.mobile-tools-open .zoom-control { order: 7; }
   .workspace { grid-template-columns: 1fr; height: calc(100vh - var(--header-height) - var(--mobile-dock-height) - env(safe-area-inset-bottom)); height: calc(100dvh - var(--header-height) - var(--mobile-dock-height) - env(safe-area-inset-bottom)); }
   .studio-shell.mobile-tools-visible .workspace { height: calc(100vh - var(--header-height) - var(--mobile-dock-height) - var(--toolbar-height) - env(safe-area-inset-bottom)); height: calc(100dvh - var(--header-height) - var(--mobile-dock-height) - var(--toolbar-height) - env(safe-area-inset-bottom)); }
   .instrument-panel { display: none; }
@@ -463,7 +482,7 @@ kbd { display: inline-grid; min-width: 20px; height: 19px; place-items: center; 
   .app-header, .note-toolbar, .mobile-input-dock, .instrument-panel, .properties-panel, .canvas-controls, .modal-backdrop, .drawer-scrim { display: none !important; }
   .studio-shell, .workspace, .canvas-area { display: block; height: auto; overflow: visible; padding: 0; background: white; }
   .score-page { width: 100%; min-height: 0; margin: 0; padding: 0; box-shadow: none; break-after: page; }
-  .staff-selection, .event-selection, .entry-caret, .notation-playhead { display: none; }
+  .staff-selection, .event-selection, .entry-caret, .notation-playhead, .pointer-note-preview { display: none; }
   .engraving-frame { width: 100% !important; min-width: 0; height: auto !important; overflow: visible !important; }
   .engraving-scroll-size { width: 100% !important; height: auto !important; }
   .engraving-surface { position: relative !important; width: 100% !important; height: auto !important; transform: none !important; }
