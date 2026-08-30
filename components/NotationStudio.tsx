@@ -265,7 +265,7 @@ export function NotationStudio() {
   const activeDialogRef = useRef<HTMLElement>(null);
   const eventSequence = useRef(1000);
   const audioContextRef = useRef<AudioContext | null>(null);
-  const playbackTimerRef = useRef<number | null>(null);
+  const playbackFrameRef = useRef<number | null>(null);
   const saveTimerRef = useRef<number | null>(null);
   const scoreRef = useRef(score);
   const selectedEventTargetRef = useRef<ScoreEventSelection | null>(selectedEventTarget);
@@ -678,8 +678,8 @@ export function NotationStudio() {
   }, [chordMode, score, setSelectedEventTarget]);
 
   const cancelPlayback = useCallback(() => {
-    if (playbackTimerRef.current) window.clearInterval(playbackTimerRef.current);
-    playbackTimerRef.current = null;
+    if (playbackFrameRef.current !== null) window.cancelAnimationFrame(playbackFrameRef.current);
+    playbackFrameRef.current = null;
     const context = audioContextRef.current;
     audioContextRef.current = null;
     setPlaying(false);
@@ -937,15 +937,22 @@ export function NotationStudio() {
       setStatus(playbackWindow.truncated
         ? `Playing the first ${notes.length} of ${countLabel(playbackWindow.total, "note")} at ♩ = ${score.tempo}${playbackScope}`
         : `Playing ${countLabel(notes.length, "note")} at ♩ = ${score.tempo}${playbackScope}`);
-      playbackTimerRef.current = window.setInterval(() => {
+      const updatePlayback = () => {
+        if (audioContextRef.current !== context) return;
         const elapsed = Math.max(0, context!.currentTime - start);
         setPlaybackSeconds(Math.min(total, elapsed));
-        if (elapsed >= total) finishPlayback();
-      }, 40);
+        if (elapsed >= total) {
+          playbackFrameRef.current = null;
+          finishPlayback();
+          return;
+        }
+        playbackFrameRef.current = window.requestAnimationFrame(updatePlayback);
+      };
+      playbackFrameRef.current = window.requestAnimationFrame(updatePlayback);
     } catch {
       audioContextRef.current = null;
-      if (playbackTimerRef.current) window.clearInterval(playbackTimerRef.current);
-      playbackTimerRef.current = null;
+      if (playbackFrameRef.current !== null) window.cancelAnimationFrame(playbackFrameRef.current);
+      playbackFrameRef.current = null;
       setPlaying(false);
       setPlaybackSeconds(null);
       setStatus("Playback could not start — this browser could not prepare the audio graph");
@@ -1288,7 +1295,7 @@ export function NotationStudio() {
   }, [activeDialogOpen, dotCount, enterEvent, exportOpen, liveEngravingUnavailable, mobileToolsOpen, openHelpDialog, playScore, redo, removeLatestInput, saveNow, toggleTie, undo]);
 
   useEffect(() => () => {
-    if (playbackTimerRef.current) window.clearInterval(playbackTimerRef.current);
+    if (playbackFrameRef.current !== null) window.cancelAnimationFrame(playbackFrameRef.current);
     const context = audioContextRef.current;
     audioContextRef.current = null;
     if (context) {

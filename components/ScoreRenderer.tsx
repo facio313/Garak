@@ -4,6 +4,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { Beam as VexBeam, Stave as VexStave, StaveNote, Voice as VexVoice } from "vexflow";
 import { keySignaturesEqual, resolveMeasureAccidentals, timeSignaturesEqual } from "../lib/music/engraving";
 import { LIVE_ENGRAVING_LIMITS, planLiveEngraving } from "../lib/music/engraving-budget";
+import { waitForEngravingFonts } from "../lib/music/engraving-fonts";
+import { type MeasureTickLayout, xForMeasureTick } from "../lib/music/engraving-position";
 import { fifthsToVexFlowKey, writtenKeyForPart } from "../lib/music/key-signatures";
 import { getDefaultBeamGroups, getFullMeasureDuration } from "../lib/music/meter";
 import type { MusicEvent, PartData, ScoreDocument, StaffData, VoiceData } from "../lib/music/model";
@@ -53,14 +55,11 @@ interface PartRowGroup {
   lastRowIndex: number;
 }
 
-interface MeasureScreenLayout {
+interface MeasureScreenLayout extends MeasureTickLayout {
   measureId: string;
   systemIndex: number;
-  startX: number;
-  endX: number;
   top: number;
   height: number;
-  tickAnchors: Array<{ tick: number; x: number }>;
 }
 
 interface EventScreenLayout extends ScoreEventSelection {
@@ -194,23 +193,6 @@ function scrollStaffRowIntoView(
   if (nearestRow) scrollScreenRectIntoView(frame, nearestRow, scale);
 }
 
-function xForMeasureTick(layout: MeasureScreenLayout, tick: number, capacity: number): number {
-  const safeTick = Math.max(0, Math.min(capacity, tick));
-  const anchors = [
-    ...(layout.tickAnchors.length ? layout.tickAnchors : [{ tick: 0, x: layout.startX }]),
-    { tick: capacity, x: layout.endX },
-  ].sort((left, right) => left.tick - right.tick);
-  if (safeTick <= anchors[0].tick) return anchors[0].x;
-  for (let index = 1; index < anchors.length; index += 1) {
-    const next = anchors[index];
-    if (safeTick > next.tick) continue;
-    const previous = anchors[index - 1];
-    if (next.tick === previous.tick) return next.x;
-    const progress = (safeTick - previous.tick) / (next.tick - previous.tick);
-    return previous.x + (next.x - previous.x) * progress;
-  }
-  return layout.endX;
-}
 const VEXFLOW_ARTICULATION_CODES = {
   staccato: "a.",
   tenuto: "a-",
@@ -448,8 +430,10 @@ export function ScoreRenderer({
         return;
       }
       try {
-        const { Accidental, Articulation, Beam, Dot, Formatter, Fraction, GhostNote, ModifierPosition, Renderer, Stave, StaveConnector, StaveNote, StaveTie, TextDynamics, Voice } = await import("vexflow/bravura");
+        const vexflow = await import("vexflow/bravura");
+        await waitForEngravingFonts(document.fonts);
         if (disposed || requestId !== engravingRequestRef.current || hostRef.current !== host) return;
+        const { Accidental, Articulation, Beam, Dot, Formatter, Fraction, GhostNote, ModifierPosition, Renderer, Stave, StaveConnector, StaveNote, StaveTie, TextDynamics, Voice } = vexflow;
         const renderer = new Renderer(host, Renderer.Backends.SVG);
         renderer.resize(engravingWidth, renderHeight);
         const context = renderer.getContext();
@@ -618,17 +602,18 @@ export function ScoreRenderer({
             const anchorXs = new Map<number, number[]>();
             cells.filter((cell) => !cell.placeholder).forEach((cell) => cell.notes.forEach((note, noteIndex) => {
               const tick = cell.eventTicks[noteIndex];
-              const x = (note.getNoteHeadBeginX() + note.getNoteHeadEndX()) / 2;
+              const x = note.getAbsoluteX();
               anchorXs.set(tick, [...(anchorXs.get(tick) ?? []), x]);
             }));
             const tickAnchors = [...anchorXs.entries()]
               .sort(([left], [right]) => left - right)
               .map(([tick, xs]) => ({ tick, x: xs.reduce((sum, x) => sum + x, 0) / xs.length }));
+            const rhythmicStartX = noteStartX + Stave.defaultPadding - Stave.rightPadding;
             nextMeasureLayouts.push({
               measureId,
               systemIndex,
-              startX: noteStartX,
-              endX: noteEndX - Stave.defaultPadding,
+              startX: rhythmicStartX,
+              endX: noteEndX,
               top: TOP_PADDING + systemIndex * systemHeight + 5,
               height: Math.max(56, rows.length * ROW_HEIGHT - 10),
               tickAnchors,

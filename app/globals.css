@@ -186,7 +186,7 @@ kbd { display: inline-grid; min-width: 20px; height: 19px; place-items: center; 
 .engraving-deferred strong { color: var(--blue-deep); font-family: Georgia,serif; font-size: 16px; font-weight: 600; }
 .engraving-deferred span { max-width: 560px; font-size: 11px; line-height: 1.5; }
 .engraving-fallback { position: absolute; top: 6px; left: 50%; z-index: 9; max-width: calc(100% - 24px); translate: -50% 0; border: 1px solid #c9d8dd; border-radius: 999px; background: rgba(243,248,249,.97); padding: 6px 10px; color: var(--blue-deep); font-size: 10px; font-weight: 680; text-align: center; box-shadow: 0 3px 12px rgba(44,40,33,.08); }
-.entry-caret, .notation-playhead { position: absolute; z-index: 6; width: calc(2px * var(--engraving-ui-scale,1)); pointer-events: none; }
+.entry-caret, .notation-playhead { position: absolute; z-index: 6; width: calc(2px * var(--engraving-ui-scale,1)); margin-left: calc(-1px * var(--engraving-ui-scale,1)); pointer-events: none; }
 .entry-caret { height: 70px; border-radius: calc(2px * var(--engraving-ui-scale,1)); background: var(--blue); box-shadow: 0 0 0 calc(3px * var(--engraving-ui-scale,1)) rgba(33,95,120,.11); }
 .entry-caret::after, .notation-playhead::before { content: ""; position: absolute; top: calc(-4px * var(--engraving-ui-scale,1)); left: calc(-3px * var(--engraving-ui-scale,1)); width: calc(8px * var(--engraving-ui-scale,1)); height: calc(8px * var(--engraving-ui-scale,1)); border-radius: 50%; background: currentColor; }
 .entry-caret { color: var(--blue); }

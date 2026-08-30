@@ -225,6 +225,9 @@ test("ships product metadata and removes the disposable starter", async () => {
   assert.ok(studio.includes('Playing the first ${notes.length} of ${countLabel(playbackWindow.total, "note")}'), "playback truncation must be explicit and grammatical");
   assert.ok(studio.includes('Playing ${countLabel(notes.length, "note")}'), "single-note playback status must use the singular noun");
   assert.match(studio, /context!?\.currentTime - start/, "the visual cursor must share Web Audio's scheduled clock and pre-roll");
+  assert.ok(studio.includes("window.requestAnimationFrame(updatePlayback)"), "the visual cursor must sample the audio clock every display frame instead of skipping notation anchors");
+  assert.ok(studio.includes("window.cancelAnimationFrame(playbackFrameRef.current)"), "playback frame updates must be cancelled on stop, failure, and teardown");
+  assert.doesNotMatch(studio, /window\.setInterval\(\(\) => \{[\s\S]*?context!?\.currentTime - start/, "playback must not reduce cursor motion to 25 Hz intervals");
   assert.match(studio, /try \{[\s\S]*?context = new AudioContext\(\);[\s\S]*?context\.createGain\(\);[\s\S]*?context!\.createOscillator\(\);[\s\S]*?\} catch \{[\s\S]*?context\.close\(\)/, "audio graph construction failures must close the partial context and restore idle playback state");
   assert.doesNotMatch(studio, /performance\.now\(\)/, "playback must not mix the document clock with the AudioContext clock");
   assert.ok(studio.includes("scoreNotatedDurationSeconds(score)"), "playback must keep the cursor through the complete score timeline, including engraved trailing measures");
@@ -384,6 +387,15 @@ test("ships product metadata and removes the disposable starter", async () => {
   assert.ok(renderer.includes("new TextDynamics({ duration, text: event.dynamic, line: 9 })"));
   assert.ok(renderer.includes("new Articulation(VEXFLOW_ARTICULATION_CODES[event.articulation]).setPosition(ModifierPosition.ABOVE)"));
   assert.ok(renderer.includes('await import("vexflow/bravura")'), "the renderer must use the audited three-font Bravura entry");
+  const fontGateIndex = renderer.indexOf("await waitForEngravingFonts(document.fonts)");
+  const firstVexFlowLayoutIndex = renderer.indexOf("new Stave(");
+  assert.ok(fontGateIndex >= 0, "engraving must wait for its embedded music fonts");
+  assert.ok(fontGateIndex < firstVexFlowLayoutIndex, "music fonts must be ready before VexFlow measures or positions any glyph");
+  assert.match(
+    renderer.slice(fontGateIndex, firstVexFlowLayoutIndex),
+    /requestId !== engravingRequestRef\.current \|\| hostRef\.current !== host/,
+    "engraving must revalidate its async request after waiting for fonts",
+  );
   for (const code of ['staccato: "a."', 'tenuto: "a-"', 'accent: "a>"', 'marcato: "a^"']) {
     assert.ok(renderer.includes(code), `the installed VexFlow articulation map must include ${code}`);
   }
@@ -402,8 +414,12 @@ test("ships product metadata and removes the disposable starter", async () => {
   assert.ok(playbackPosition.includes("TICKS_PER_WHOLE / measure.time.denominator"), "transport beats must follow each measure's denominator");
   assert.ok(renderer.includes("locatePlaybackPosition(score, playbackSeconds)"), "the engraved cursor must consume the shared semantic playback mapper");
   assert.ok(renderer.includes('className="notation-playhead"'), "playback must render a measure-local notation cursor");
+  assert.ok(styles.includes("margin-left: calc(-1px * var(--engraving-ui-scale,1))"), "the two-screen-pixel notation cursors must be centered on their VexFlow anchor");
   assert.ok(renderer.includes("xForMeasureTick(playbackLayout, playbackPosition.tickInMeasure"), "the notation cursor must interpolate from semantic ticks through engraved anchors");
-  assert.ok(renderer.includes("getNoteHeadBeginX() + note.getNoteHeadEndX()"), "playback tick anchors must use the rendered notehead center rather than a page percentage");
+  assert.ok(renderer.includes("const x = note.getAbsoluteX()"), "playback tick anchors must use VexFlow's shared rhythmic position rather than stem direction or glyph width");
+  assert.ok(renderer.includes("noteStartX + Stave.defaultPadding - Stave.rightPadding"), "an empty measure must begin on VexFlow's padded rhythmic grid rather than at the modifier boundary");
+  assert.ok(renderer.includes("endX: noteEndX"), "silent measure tails must carry the playback cursor to the actual right barline");
+  assert.doesNotMatch(renderer, /endX: noteEndX - Stave\.defaultPadding/, "the playback endpoint must not subtract VexFlow's formatting padding twice");
   assert.ok(renderer.includes("cells.filter((cell) => !cell.placeholder)"), "centered placeholder rests must not skew the shared playback cursor");
   assert.doesNotMatch(renderer, /playbackLayout\.startX\s*\+[^\n]*measureProgress/, "playback must not regress to linear page or measure percentages");
   assert.ok(renderer.includes("note.getBoundingBox()"), "rendered event bounds must drive direct note/rest selection");
