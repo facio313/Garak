@@ -1,4 +1,6 @@
-import type { Articulation, Clef, MusicEvent, PartData, ScoreDocument, VoiceData } from "./model";
+import type { Articulation, Clef, HairpinSpan, MusicEvent, PartData, ScoreDocument, VoiceData } from "./model";
+import { dynamicLanes, hairpinEnvelope, laneVelocity } from "./hairpins";
+import type { VelocityPoint } from "./hairpins";
 import { writtenKeyForPart } from "./key-signatures";
 import {
   DEFAULT_MIDI_VELOCITY,
@@ -78,6 +80,8 @@ export function scoreToMusicXML(score: ScoreDocument): string {
   const midiRoutes = midiRoutesForParts(score.parts);
   const tiedFrom = new Set(score.ties.map((tie) => tie.fromNoteId));
   const tiedTo = new Set(score.ties.map((tie) => tie.toNoteId));
+  const hairpinStarts = new Map((score.hairpins ?? []).map((span) => [span.startEventId, span]));
+  const hairpinEnds = new Map((score.hairpins ?? []).map((span) => [span.endEventId, span]));
   const xmlIds = musicXMLPartIds(score.parts);
   const exportedTempo = Math.round(score.tempo);
   const partList = score.parts.map((part, partIndex) => `
@@ -122,7 +126,7 @@ export function scoreToMusicXML(score: ScoreDocument): string {
         return {
           duration: measureDuration,
           notes: voice.events.length
-            ? `${voice.events.map((event) => eventToXML(event, tiedFrom, tiedTo, voiceNumber, staffNumber)).join("")}${eventDuration < measureDuration ? forwardToXML(measureDuration - eventDuration, voiceNumber, staffNumber) : ""}`
+            ? `${voice.events.map((event) => `${hairpinDirectionToXML(hairpinStarts.get(event.id), false, voiceNumber, staffNumber)}${eventToXML(event, tiedFrom, tiedTo, voiceNumber, staffNumber)}${hairpinDirectionToXML(hairpinEnds.get(event.id), true, voiceNumber, staffNumber)}`).join("")}${eventDuration < measureDuration ? forwardToXML(measureDuration - eventDuration, voiceNumber, staffNumber) : ""}`
             : fullMeasureRestToXML(measureDuration, voiceNumber, staffNumber),
         };
       });
@@ -142,7 +146,7 @@ export function scoreToMusicXML(score: ScoreDocument): string {
 <!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 4.0 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">
 <score-partwise version="4.0">
   <work><work-title>${xml(score.metadata.title)}</work-title></work>
-  <identification><creator type="composer">${xml(score.metadata.composer)}</creator><encoding><software>Garak Studio</software><encoding-date>${new Date().toISOString().slice(0, 10)}</encoding-date></encoding></identification>
+  <identification><creator type="composer">${xml(score.metadata.composer)}</creator>${score.metadata.copyright ? `<rights>${xml(score.metadata.copyright)}</rights>` : ""}<encoding><software>Garak Studio</software><encoding-date>${new Date().toISOString().slice(0, 10)}</encoding-date></encoding></identification>
   <part-list>${partList}
   </part-list>${parts}
 </score-partwise>`;
@@ -228,6 +232,13 @@ function dynamicDirectionToXML(event: MusicEvent, voiceNumber: number, staffNumb
         <direction placement="below"><direction-type><dynamics><${event.dynamic}/></dynamics></direction-type><voice>${voiceNumber}</voice>${staff}<sound dynamics="${soundDynamics}"/></direction>`;
 }
 
+function hairpinDirectionToXML(span: HairpinSpan | undefined, stop: boolean, voiceNumber: number, staffNumber?: number): string {
+  if (!span) return "";
+  const staff = staffNumber === undefined ? "" : `<staff>${staffNumber}</staff>`;
+  const dynamics = Number((DYNAMIC_VELOCITIES[stop ? span.to : span.from] * 100 / 90).toFixed(2));
+  return `\n        <direction placement="below"><direction-type><wedge type="${stop ? "stop" : span.kind}" number="1"/></direction-type><voice>${voiceNumber}</voice>${staff}<sound dynamics="${dynamics}"/></direction>`;
+}
+
 export function encodeMidiVariableLength(value: number): number[] {
   if (!Number.isSafeInteger(value) || value < 0 || value > 0x0fffffff) {
     throw new RangeError("A MIDI variable-length value must be an integer from 0 through 0x0FFFFFFF.");
@@ -251,6 +262,7 @@ interface MidiEvent { tick: number; order: number; bytes: number[]; }
 interface TimedNote {
   noteId: string;
   partId: string;
+  staffId: string;
   midi: number;
   velocity: number;
   startTicks: number;
@@ -258,6 +270,7 @@ interface TimedNote {
   /** Rhythmic span before articulation and live-playback gate shortening. */
   notatedDurationTicks: number;
   articulation?: Articulation;
+  velocityEnvelope?: VelocityPoint[];
 }
 
 interface MidiRoute {
@@ -289,6 +302,7 @@ function midiRoutesForParts(parts: readonly PartData[]): MidiRoute[] {
 
 function collectTimedNotes(score: ScoreDocument, includedPartIds?: ReadonlySet<string>): TimedNote[] {
   const notes: TimedNote[] = [];
+  const lanes = score.hairpins?.length ? dynamicLanes(score) : new Map();
   score.parts.forEach((part) => {
     if (includedPartIds && !includedPartIds.has(part.id)) return;
     let measureStart = 0;
@@ -301,10 +315,12 @@ function collectTimedNotes(score: ScoreDocument, includedPartIds?: ReadonlySet<s
           const ticks = durationTicks(event.duration);
           if (event.dynamic) velocity = DYNAMIC_VELOCITIES[event.dynamic];
           if (event.kind === "note") {
-            const performedVelocity = Math.min(127, velocity + (event.articulation ? ARTICULATION_VELOCITY_BONUSES[event.articulation] : 0));
+            const lane = lanes.get(staff.id);
+            const performedVelocity = Math.min(127, Math.round(lane ? laneVelocity(lane, cursor) : velocity) + (event.articulation ? ARTICULATION_VELOCITY_BONUSES[event.articulation] : 0));
             event.notes.forEach((note) => notes.push({
               noteId: note.id,
               partId: part.id,
+              staffId: staff.id,
               midi: Math.max(0, Math.min(127, writtenToSounding(note.pitch, part.instrument.transposition))),
               velocity: performedVelocity,
               startTicks: cursor,
@@ -346,7 +362,12 @@ function collectTimedNotes(score: ScoreDocument, includedPartIds?: ReadonlySet<s
   // aggregated backward into the already-started performance event.
   return notes.filter((note) => !merged.has(note.noteId)).map((note) => note.articulation === "staccato"
     ? { ...note, durationTicks: Math.max(1, Math.round(note.durationTicks * STACCATO_GATE_RATIO)) }
-    : note);
+    : note).map((note) => {
+      const lane = lanes.get(note.staffId);
+      const envelope = lane ? hairpinEnvelope(lane, note.startTicks, note.startTicks + note.durationTicks,
+        note.articulation ? ARTICULATION_VELOCITY_BONUSES[note.articulation] : 0) : undefined;
+      return envelope ? { ...note, velocityEnvelope: envelope } : note;
+    });
 }
 
 /**
@@ -393,7 +414,7 @@ function normalizeMidiNoteIntervals(score: ScoreDocument, notes: TimedNote[], ro
   return normalized;
 }
 
-function encodeTrack(events: MidiEvent[]): number[] {
+function encodeTrack(events: MidiEvent[], endTick: number): number[] {
   const sorted = [...events].sort((a, b) => a.tick - b.tick || a.order - b.order);
   const data: number[] = [];
   let previousTick = 0;
@@ -401,7 +422,9 @@ function encodeTrack(events: MidiEvent[]): number[] {
     data.push(...encodeMidiVariableLength(Math.max(0, event.tick - previousTick)), ...event.bytes);
     previousTick = event.tick;
   }
-  data.push(0, 0xff, 0x2f, 0);
+  // End-of-track defines the duration even when a final rest or an empty bar
+  // follows the last note. Keep every track aligned with the complete score.
+  data.push(...encodeMidiVariableLength(Math.max(0, endTick - previousTick)), 0xff, 0x2f, 0);
   return chunk("MTrk", data);
 }
 
@@ -428,7 +451,8 @@ export function scoreToMidi(score: ScoreDocument): Uint8Array {
     previousTime = measure.time;
     scoreTick += measureCapacity(measure);
   });
-  const tracks = [encodeTrack(tempoEvents)];
+  const endTick = Math.round(scoreTick / 2);
+  const tracks = [encodeTrack(tempoEvents, endTick)];
 
   const timedNotes = normalizeMidiNoteIntervals(score, collectTimedNotes(score), midiRoutes);
   score.parts.forEach((part, partIndex) => {
@@ -445,7 +469,7 @@ export function scoreToMidi(score: ScoreDocument): Uint8Array {
       events.push({ tick: start, order: 3, bytes: [0x90 | channel, note.midi, note.velocity] });
       events.push({ tick: Math.max(start + 1, end), order: 0, bytes: [0x80 | channel, note.midi, 0] });
     });
-    tracks.push(encodeTrack(events));
+    tracks.push(encodeTrack(events, endTick));
   });
 
   const header = chunk("MThd", [...uint16(1), ...uint16(tracks.length), ...uint16(480)]);
@@ -461,6 +485,8 @@ export interface PlaybackNote {
   durationSeconds: number;
   /** Rhythmic note span used by the engraved playhead. */
   notatedDurationSeconds: number;
+  /** Offsets from this single attack, including a sustained tie chain. */
+  velocityEnvelope?: { offsetSeconds: number; velocity: number }[];
 }
 
 export function collectPlaybackNotes(score: ScoreDocument, includedPartIds?: readonly string[]): PlaybackNote[] {
@@ -475,6 +501,9 @@ export function collectPlaybackNotes(score: ScoreDocument, includedPartIds?: rea
     startSeconds: note.startTicks * secondsPerTick,
     durationSeconds: Math.max(.005, note.durationTicks * secondsPerTick * .9),
     notatedDurationSeconds: note.notatedDurationTicks * secondsPerTick,
+    ...(note.velocityEnvelope ? { velocityEnvelope: note.velocityEnvelope.map((point) => ({
+      offsetSeconds: (point.tick - note.startTicks) * secondsPerTick, velocity: point.velocity,
+    })) } : {}),
   }));
 }
 

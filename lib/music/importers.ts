@@ -1,5 +1,6 @@
 import { XMLParser, XMLValidator } from "fast-xml-parser";
 import { INSTRUMENTS } from "./catalog";
+import { eventTimeline } from "./hairpins";
 import { normalizeKeyFifths, transpositionFifths } from "./key-signatures";
 import type { KeySignature } from "./key-signatures";
 import type {
@@ -18,7 +19,7 @@ import type {
   StaffData,
   Transposition,
 } from "./model";
-import { ARTICULATIONS, DYNAMIC_MARKINGS, durationTicks, measureCapacity, SCORE_VALIDATION_LIMITS, TICKS_PER_QUARTER, TICKS_PER_WHOLE } from "./model";
+import { ARTICULATIONS, DYNAMIC_MARKINGS, DYNAMIC_VELOCITIES, durationTicks, measureCapacity, SCORE_VALIDATION_LIMITS, TICKS_PER_QUARTER, TICKS_PER_WHOLE } from "./model";
 
 type XmlNode = Record<string, unknown>;
 
@@ -153,7 +154,8 @@ function attribute(node: XmlNode | undefined, name: string): string | undefined 
 }
 
 function directionDynamic(node: XmlNode, warnings: WarningSink, context: string): DynamicMarking | null {
-  if (firstChild(node, "offset")) {
+  const hasWedge = children(node, "direction-type").some((type) => children(type, "wedge").length > 0);
+  if (firstChild(node, "offset") && !hasWedge) {
     warnings.push(`${context}: direction offsets are not editable yet; the offset was ignored without moving the musical cursor.`);
   }
 
@@ -162,7 +164,6 @@ function directionDynamic(node: XmlNode, warnings: WarningSink, context: string)
     for (const entry of content(directionType)) {
       const kind = elementName(entry);
       if (kind === "wedge") {
-        warnings.push(`${context}: wedge and hairpin directions are not editable yet and were skipped.`);
         continue;
       }
       if (kind === "words" || kind === "other-direction" || kind === "symbol" || kind === "rehearsal") {
@@ -188,7 +189,7 @@ function directionDynamic(node: XmlNode, warnings: WarningSink, context: string)
   }
 
   const soundDynamics = attribute(firstChild(node, "sound"), "dynamics");
-  if (!candidates.length && soundDynamics !== undefined) {
+  if (!candidates.length && soundDynamics !== undefined && !hasWedge) {
     warnings.push(`${context}: sound-only dynamics has no supported printable dynamic mark and was skipped.`);
   }
   if (!candidates.length) return null;
@@ -836,6 +837,9 @@ export function importMusicXML(xml: string): MusicXMLImportResult {
   }
 
   const ties: ScoreDocument["ties"] = [];
+  type ImportedWedge = { staffId: string; startTick: number; endTick: number; kind: "crescendo" | "diminuendo"; from?: DynamicMarking; to?: DynamicMarking };
+  const importedWedges: ImportedWedge[] = [];
+  let wedgeCount = 0;
   let materializedEventCount = 0;
   let materializedNoteCount = 0;
   const parts: PartData[] = sourceParts.map((partNode, partIndex) => {
@@ -915,10 +919,24 @@ export function importMusicXML(xml: string): MusicXMLImportResult {
     const pendingTies = new Map<string, { noteId: string; endTick: number; eventSequence: number }>();
     const noteEventSequenceByVoice = new Map<string, number>();
     const pendingDynamics = new Map<string, { dynamic: DynamicMarking; context: string }>();
+    const pendingWedges = new Map<string, Omit<ImportedWedge, "endTick">>();
     const warnedChordArticulationEvents = new Set<string>();
     let divisions = 1;
 
     sourceMeasures[partIndex].forEach((measureNode, measureIndex) => {
+      const unsupported: Record<string, string> = { slur: "slur", lyric: "lyrics", fermata: "fermata", repeat: "repeat barline", ending: "repeat ending", harmony: "chord symbol", ornaments: "ornaments" };
+      const pending = [measureNode];
+      const reported = new Set<string>();
+      while (pending.length) {
+        const node = pending.pop()!;
+        for (const [tag, value] of Object.entries(node)) {
+          if (unsupported[tag] && !reported.has(tag)) {
+            reported.add(tag);
+            warnings.push(`${name}, measure ${measureIndex + 1}: ${unsupported[tag]} is not supported and will be omitted from the editable copy and re-export. Keep the original file.`);
+          }
+          if (Array.isArray(value)) for (const child of value as XmlNode[]) pending.push(child);
+        }
+      }
       const measureId = measureOrder[measureIndex];
       const capacity = measureCapacity(measures[measureId]);
       const materializedTicks = Array.from({ length: staffCount }, () => 0);
@@ -1023,7 +1041,8 @@ export function importMusicXML(xml: string): MusicXMLImportResult {
           directionIndex += 1;
           const context = `${name}, measure ${measureIndex + 1}, direction ${directionIndex}`;
           const dynamic = directionDynamic(measureChild, warnings, context);
-          if (!dynamic) continue;
+          const wedges = children(measureChild, "direction-type").flatMap((type) => children(type, "wedge"));
+          if (!dynamic && !wedges.length) continue;
 
           const staffText = childText(measureChild, "staff");
           const parsedStaffNumber = staffText === undefined ? 1 : strictInteger(staffText);
@@ -1039,6 +1058,31 @@ export function importMusicXML(xml: string): MusicXMLImportResult {
             continue;
           }
 
+          for (const wedge of wedges) {
+            wedgeCount += 1;
+            if (wedgeCount > SCORE_VALIDATION_LIMITS.hairpins * 2) throw new Error("MusicXML exceeds the hairpin safety limit.");
+            const type = attribute(wedge, "type");
+            const key = `${staffIndex}:${voiceNumber}:${attribute(wedge, "number") ?? "1"}`;
+            const offset = Number(childText(measureChild, "offset") ?? 0) * TICKS_PER_QUARTER / divisions;
+            if (!Number.isSafeInteger(offset) || sourceCursor + offset < 0 || sourceCursor + offset > capacity) {
+              warnings.push(`${context}: wedge has an unsupported offset and was skipped.`); continue;
+            }
+            const tick = (measureStartTicks.get(measureId) ?? 0) + sourceCursor + offset;
+            const sound = Number(attribute(firstChild(measureChild, "sound"), "dynamics"));
+            const level = Number.isFinite(sound) && sound > 0
+              ? DYNAMIC_MARKINGS.reduce((a, b) => Math.abs(DYNAMIC_VELOCITIES[a] - sound * .9) <= Math.abs(DYNAMIC_VELOCITIES[b] - sound * .9) ? a : b)
+              : undefined;
+            if (type === "crescendo" || type === "diminuendo") {
+              if (pendingWedges.has(key)) warnings.push(`${context}: an unclosed wedge start was replaced.`);
+              pendingWedges.set(key, { staffId: staves[staffIndex].id, startTick: tick, kind: type, from: level });
+            } else if (type === "stop") {
+              const start = pendingWedges.get(key);
+              if (start && tick > start.startTick) importedWedges.push({ ...start, endTick: tick, to: level });
+              else warnings.push(`${context}: wedge stop has no preceding start and was skipped.`);
+              pendingWedges.delete(key);
+            } else if (type !== "continue") warnings.push(`${context}: unsupported wedge type was skipped.`);
+          }
+          if (!dynamic) continue;
           const key = pendingDynamicKey(staffIndex, voiceNumber);
           const previous = pendingDynamics.get(key);
           if (previous && previous.dynamic !== dynamic) {
@@ -1246,6 +1290,7 @@ export function importMusicXML(xml: string): MusicXMLImportResult {
       }
     });
     if (pendingTies.size) warnings.push(`${name}: ${pendingTies.size} tie start${pendingTies.size === 1 ? "" : "s"} had no matching destination.`);
+    if (pendingWedges.size) warnings.push(`${name}: ${pendingWedges.size} wedge and hairpin start(s) had no matching stop and were skipped.`);
     if (pendingDynamics.size) {
       warnings.push(`${name}: ${pendingDynamics.size} dynamic mark${pendingDynamics.size === 1 ? "" : "s"} had no following supported event and ${pendingDynamics.size === 1 ? "was" : "were"} skipped.`);
     }
@@ -1292,5 +1337,41 @@ export function importMusicXML(xml: string): MusicXMLImportResult {
     ties,
     updatedAt: now,
   };
+  if (importedWedges.length) {
+    const timeline = [...eventTimeline(score).values()];
+    const starts = new Map(timeline.filter((item) => item.event.kind === "note").map((item) => [`${item.staffId}:${item.startTick}`, item]));
+    const ends = new Map(timeline.filter((item) => item.event.kind === "note").map((item) => [`${item.staffId}:${item.endTick}`, item]));
+    const dynamicAt = new Map<string, DynamicMarking>();
+    const precedingDynamic = new Map<string, DynamicMarking>();
+    const staffDynamic = new Map<string, DynamicMarking>();
+    for (const item of timeline) {
+      if (item.event.dynamic) {
+        staffDynamic.set(item.staffId, item.event.dynamic);
+        dynamicAt.set(`${item.staffId}:${item.startTick}`, item.event.dynamic);
+      }
+      const dynamic = staffDynamic.get(item.staffId);
+      if (dynamic) precedingDynamic.set(item.event.id, dynamic);
+    }
+    const occupied = new Map<string, number>();
+    score.hairpins = [];
+    for (const wedge of importedWedges.sort((a, b) => a.startTick - b.startTick)) {
+      const first = starts.get(`${wedge.staffId}:${wedge.startTick}`);
+      const last = ends.get(`${wedge.staffId}:${wedge.endTick}`);
+      if (!first || !last || (occupied.get(wedge.staffId) ?? -1) > wedge.startTick) {
+        warnings.push("A wedge with overlapping spans or endpoints between supported notes was skipped."); continue;
+      }
+      const from = wedge.from ?? precedingDynamic.get(first.event.id)
+        ?? (wedge.kind === "crescendo" ? "p" : "f");
+      const followingMark = dynamicAt.get(`${wedge.staffId}:${wedge.endTick}`);
+      const fallbackIndex = Math.max(0, Math.min(DYNAMIC_MARKINGS.length - 1, DYNAMIC_MARKINGS.indexOf(from) + (wedge.kind === "crescendo" ? 2 : -2)));
+      const to = wedge.to ?? followingMark ?? DYNAMIC_MARKINGS[fallbackIndex];
+      if (wedge.kind === "crescendo" ? DYNAMIC_VELOCITIES[from] >= DYNAMIC_VELOCITIES[to] : DYNAMIC_VELOCITIES[from] <= DYNAMIC_VELOCITIES[to]) {
+        warnings.push("A wedge with dynamics contrary to its direction was skipped."); continue;
+      }
+      if (!wedge.from || !wedge.to) warnings.push(`A ${wedge.kind} without exact playback levels uses ${from} to ${to}; edit these in Cresc. / dim.`);
+      score.hairpins.push({ id: `import-hairpin-${score.hairpins.length + 1}`, startEventId: first.event.id, endEventId: last.event.id, kind: wedge.kind, from, to });
+      occupied.set(wedge.staffId, wedge.endTick);
+    }
+  }
   return { score, warnings: warnings.toArray() };
 }

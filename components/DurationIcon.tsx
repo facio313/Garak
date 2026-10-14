@@ -14,36 +14,34 @@ const FLAG_COUNTS: Readonly<Record<DurationBase, number>> = {
   64: 4,
 };
 
-/**
- * A compact, code-native notation icon. SVG geometry avoids platform fallback
- * boxes for supplementary-plane Unicode note characters while retaining the
- * familiar notehead, stem, and flag shapes.
- */
+/** Consistent noteheads, stems and flags in one compact icon box. */
 export function DurationIcon({ value }: DurationIconProps) {
   const whole = value === 1;
   const openHead = value === 1 || value === 2;
-  const flagCount = FLAG_COUNTS[value];
-  const noteheadY = whole ? 21 : 31;
+  const noteheadX = whole ? 12 : 8;
+  const noteheadY = whole ? 14 : 23;
 
   return (
     <svg
       className={`duration-icon duration-${value}`}
-      viewBox="0 0 32 42"
+      viewBox="0 0 24 28"
+      width="24"
+      height="24"
       aria-hidden="true"
       focusable="false"
     >
-      {!whole ? <path className="duration-stem" d="M18 31V4" /> : null}
+      {!whole ? <path className="duration-stem" d="M11.7 22.5V3" /> : null}
       <ellipse
         className={`duration-notehead ${openHead ? "open" : "filled"}`}
-        cx={whole ? 15 : 11}
+        cx={noteheadX}
         cy={noteheadY}
-        rx={whole ? 9 : 7.5}
-        ry={whole ? 5.2 : 4.6}
-        transform={`rotate(-18 ${whole ? 15 : 11} ${noteheadY})`}
+        rx={whole ? 5.3 : 4.2}
+        ry={whole ? 3.3 : 2.7}
+        transform={`rotate(-18 ${noteheadX} ${noteheadY})`}
       />
-      {Array.from({ length: flagCount }, (_, index) => {
-        const y = 4 + index * 6;
-        return <path className="duration-flag" d={`M18 ${y} C27 ${y + 2}, 27 ${y + 8}, 20 ${y + 13} C23 ${y + 8}, 22 ${y + 5}, 18 ${y + 5} Z`} key={y} />;
+      {Array.from({ length: FLAG_COUNTS[value] }, (_, index) => {
+        const y = 3 + index * 3.6;
+        return <path className="duration-flag" d={`M11.7 ${y} C19 ${y + 2}, 19 ${y + 6}, 14 ${y + 9} C17 ${y + 5}, 15.5 ${y + 3}, 11.7 ${y + 3} Z`} key={y} />;
       })}
     </svg>
   );

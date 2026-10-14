@@ -64,6 +64,8 @@ export interface ScoreNote {
 }
 
 export interface NoteEvent {
+  /** Original event ID shared only by automatically split rhythmic segments. */
+  rhythmGroupId?: string;
   id: string;
   kind: "note";
   notes: ScoreNote[];
@@ -74,6 +76,7 @@ export interface NoteEvent {
 }
 
 export interface RestEvent {
+  rhythmGroupId?: string;
   id: string;
   kind: "rest";
   duration: DurationValue;
@@ -123,6 +126,16 @@ export interface TieEdge {
   toNoteId: string;
 }
 
+/** From the first event's onset through the last event's full written duration. */
+export interface HairpinSpan {
+  id: string;
+  startEventId: string;
+  endEventId: string;
+  kind: "crescendo" | "diminuendo";
+  from: DynamicMarking;
+  to: DynamicMarking;
+}
+
 export interface ScoreDocument {
   format: "garak-score";
   schemaVersion: 1;
@@ -138,6 +151,7 @@ export interface ScoreDocument {
   measures: Record<string, MeasureMeta>;
   parts: PartData[];
   ties: TieEdge[];
+  hairpins?: HairpinSpan[];
   updatedAt: string;
 }
 
@@ -162,6 +176,7 @@ export const SCORE_VALIDATION_LIMITS = Object.freeze({
   events: 50_000,
   notes: 100_000,
   ties: 50_000,
+  hairpins: 10_000,
   timelineTicks: 0x0fffffff * 2,
   idCharacters: 256,
   voiceIdCharacters: 1_024,
@@ -325,6 +340,9 @@ function scoreComplexityError(candidate: ValidationRecord): string | null {
   const rawTies = candidate.ties;
   if (Array.isArray(rawTies) && rawTies.length > SCORE_VALIDATION_LIMITS.ties) {
     return `Score exceeds the ${SCORE_VALIDATION_LIMITS.ties.toLocaleString("en-US")}-tie safety limit.`;
+  }
+  if (Array.isArray(candidate.hairpins) && candidate.hairpins.length > SCORE_VALIDATION_LIMITS.hairpins) {
+    return `Score exceeds the ${SCORE_VALIDATION_LIMITS.hairpins.toLocaleString("en-US")}-hairpin safety limit.`;
   }
 
   const staffRecords: ValidationRecord[] = [];
@@ -533,6 +551,7 @@ function validateScoreStructure(score: unknown, requireComplete: boolean): strin
   const noteIds = new Set<string>();
   const notePitches = new Map<string, Pitch>();
   const noteLocations = new Map<string, TieNoteLocation>();
+  const eventLocations = new Map<string, TieNoteLocation>();
   const rawParts = candidate.parts;
   if (!Array.isArray(rawParts) || !rawParts.length) errors.push("At least one instrument is required.");
   if (Array.isArray(rawParts)) rawParts.forEach((rawPart, partIndex) => {
@@ -656,7 +675,7 @@ function validateScoreStructure(score: unknown, requireComplete: boolean): strin
               timelineIsValid = false;
               return;
             }
-            registerGlobalId(rawEvent.id, `${eventLabel} ID`);
+            const eventId = registerGlobalId(rawEvent.id, `${eventLabel} ID`);
 
             if (Object.prototype.hasOwnProperty.call(rawEvent, "rest")) {
               errors.push(`${eventLabel} must not contain the legacy rest flag; use the event kind discriminator.`);
@@ -717,6 +736,9 @@ function validateScoreStructure(score: unknown, requireComplete: boolean): strin
               if (hasEventPitch) errors.push(`${eventLabel} must not contain event-level pitch data; pitches belong to note entries.`);
               errors.push(`${eventLabel} has an invalid event kind.`);
               return;
+            }
+            if (eventId && eventStartTick !== null && eventEndTick !== null) {
+              eventLocations.set(eventId, { partIndex, staffIndex, voiceIndex, eventStartTick, eventEndTick });
             }
             if (hasEventPitch) errors.push(`${eventLabel} is a note event and must not contain event-level pitch data; pitches belong to note entries.`);
             if (hasArticulation && !VALID_ARTICULATIONS.has(rawEvent.articulation as Articulation)) {
@@ -855,6 +877,37 @@ function validateScoreStructure(score: unknown, requireComplete: boolean): strin
       }
     }
     if (visited < remainingIndegrees.size) errors.push("Tie graph must not contain cycles.");
+  }
+
+  const hairpinIntervals = new Map<string, { start: number; end: number }[]>();
+  if (candidate.hairpins !== undefined && !Array.isArray(candidate.hairpins)) {
+    errors.push("Score hairpins must be an array.");
+  } else if (Array.isArray(candidate.hairpins)) candidate.hairpins.forEach((span, index) => {
+    const label = `Hairpin ${index + 1}`;
+    if (!isValidationRecord(span)) { errors.push(`${label} must be an object.`); return; }
+    registerGlobalId(span.id, `${label} ID`);
+    if (span.kind !== "crescendo" && span.kind !== "diminuendo") errors.push(`${label} has an invalid direction.`);
+    if (!VALID_DYNAMIC_MARKINGS.has(span.from as DynamicMarking) || !VALID_DYNAMIC_MARKINGS.has(span.to as DynamicMarking)) {
+      errors.push(`${label} must have supported start and end dynamics.`);
+    } else if (span.kind === "crescendo" ? DYNAMIC_VELOCITIES[span.from as DynamicMarking] >= DYNAMIC_VELOCITIES[span.to as DynamicMarking]
+      : DYNAMIC_VELOCITIES[span.from as DynamicMarking] <= DYNAMIC_VELOCITIES[span.to as DynamicMarking]) {
+      errors.push(`${label} dynamics must follow its crescendo or diminuendo direction.`);
+    }
+    const start = typeof span.startEventId === "string" ? eventLocations.get(span.startEventId) : undefined;
+    const end = typeof span.endEventId === "string" ? eventLocations.get(span.endEventId) : undefined;
+    if (!start || !end) { errors.push(`${label} endpoints must reference existing note events.`); return; }
+    if (start.partIndex !== end.partIndex || start.staffIndex !== end.staffIndex || start.voiceIndex !== end.voiceIndex) {
+      errors.push(`${label} endpoints must belong to the same part, staff, and voice.`); return;
+    }
+    if (end.eventStartTick < start.eventStartTick) { errors.push(`${label} end must not precede its start.`); return; }
+    const key = `${start.partIndex}:${start.staffIndex}:${start.voiceIndex}`;
+    const intervals = hairpinIntervals.get(key) ?? [];
+    intervals.push({ start: start.eventStartTick, end: end.eventEndTick });
+    hairpinIntervals.set(key, intervals);
+  });
+  for (const intervals of hairpinIntervals.values()) {
+    intervals.sort((a, b) => a.start - b.start);
+    if (intervals.some((item, i) => i > 0 && item.start < intervals[i - 1].end)) errors.push("Hairpins in the same voice must not overlap.");
   }
 
   return [...errors];
