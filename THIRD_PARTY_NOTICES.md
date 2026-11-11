@@ -1,6 +1,6 @@
 # Garak Studio third-party notices
 
-Last inventory update: 2026-11-12 (Asia/Seoul). XML parser and its changed transitive packages were rechecked; historical bundle measurements below remain dated 2026-08-30.
+Last inventory update: 2026-11-12 (Asia/Seoul). XML parser, its changed transitive packages, and the React 19.2.9 server/client runtime packages were rechecked; historical bundle measurements below remain dated 2026-08-30.
 
 This file is the engineering license inventory for Garak Studio's direct runtime dependencies and the core build/runtime adapters that may contribute code or assets to a release. Exact versions below were cross-checked between `package-lock.json` and the installed package's `node_modules/<package>/package.json`. Release-facing source links are pinned to the matching tag or npm `gitHead` when one is available.
 
@@ -19,8 +19,8 @@ This is not a copy of the licenses and is not legal advice. A distributed web, d
 
 | Package and installed version | License evidence | Official upstream | Release compliance note |
 | --- | --- | --- | --- |
-| `react@19.2.8` | `MIT`; installed `node_modules/react/package.json` and `node_modules/react/LICENSE` | [React 19.2.8 — `packages/react`](https://github.com/facebook/react/tree/v19.2.8/packages/react) | Browser/server copies: ship the complete React MIT notice. |
-| `react-dom@19.2.8` | `MIT`; installed `node_modules/react-dom/package.json` and `node_modules/react-dom/LICENSE` | [React 19.2.8 — `packages/react-dom`](https://github.com/facebook/react/tree/v19.2.8/packages/react-dom) | Browser/server copies: ship the complete React DOM MIT notice. |
+| `react@19.2.9` | `MIT`; installed `node_modules/react/package.json` and `node_modules/react/LICENSE` | [React 19.2.9 — `packages/react`](https://github.com/facebook/react/tree/v19.2.9/packages/react) | Browser/server copies: ship the complete React MIT notice. |
+| `react-dom@19.2.9` | `MIT`; installed `node_modules/react-dom/package.json` and `node_modules/react-dom/LICENSE` | [React 19.2.9 — `packages/react-dom`](https://github.com/facebook/react/tree/v19.2.9/packages/react-dom) | Browser/server copies: ship the complete React DOM MIT notice. |
 | `vexflow@5.0.0` | VexFlow code: `MIT`, from installed `node_modules/vexflow/package.json` and `node_modules/vexflow/LICENSE`; Garak selects the `vexflow/bravura` entry, which embeds separately licensed fonts audited below | [VexFlow 5.0.0 source](https://github.com/vexflow/vexflow/tree/5.0.0) | Ship the complete VexFlow MIT notice **and** the complete Academico/Bravura font notices identified in the embedded-font audit. The npm package's root MIT file does not contain those font notices. |
 | `lucide-react@1.33.0` | Package metadata: `ISC`; installed `node_modules/lucide-react/LICENSE` also contains a separate MIT notice for listed Feather-derived icons | [Lucide 1.33.0 — `packages/lucide-react`](https://github.com/lucide-icons/lucide/tree/1.33.0/packages/lucide-react) | Ship the **entire installed Lucide LICENSE**, not only its ISC opening, so the Feather-derived icon notice is retained too. |
 | `fast-xml-parser@5.12.0` | `MIT`; installed `node_modules/fast-xml-parser/package.json` and `node_modules/fast-xml-parser/LICENSE` | [fast-xml-parser 5.12.0](https://github.com/NaturalIntelligence/fast-xml-parser/tree/v5.12.0) | The current MusicXML client chunk includes the parser and the confirmed transitives inventoried below; ship all of those notices. |
@@ -32,7 +32,7 @@ The following packages are not all direct declarations in `package.json`, but th
 
 | Package and installed version | Artifact evidence | Pinned upstream | Release compliance note |
 | --- | --- | --- | --- |
-| `scheduler@0.27.0` | `react-dom@19.2.8` resolves it in `package-lock.json`; its scheduling implementation is present in the generated React framework chunks | [React 19.2.8 — `packages/scheduler`](https://github.com/facebook/react/tree/v19.2.8/packages/scheduler) | Ship the complete Scheduler MIT notice. |
+| `scheduler@0.27.0` | `react-dom@19.2.9` resolves it in `package-lock.json`; its scheduling implementation is present in the generated React framework chunks | [React 19.2.9 — `packages/scheduler`](https://github.com/facebook/react/tree/v19.2.9/packages/scheduler) | Ship the complete Scheduler MIT notice. |
 | `@nodable/entities@3.1.0` | Entity decoder code is present in the MusicXML importer chunk; the npm artifact omits a LICENSE file | [`ac48e7ea…` — `Entity`](https://github.com/nodable/val-parsers/tree/ac48e7ea591da372be023a481875c747535812b3/Entity) | The release copies the repository-root MIT file at the package's exact npm `gitHead`; re-verify that pin on upgrade. |
 | `is-unsafe@2.0.3` | XML safety-path code and its diagnostic strings are present in the MusicXML importer chunk | [is-unsafe 2.0.3](https://github.com/NaturalIntelligence/is-unsafe/tree/v2.0.3) | Ship the complete MIT notice. |
 | `path-expression-matcher@1.6.2` | Namespace/pattern and sealed-expression-set code is present in the MusicXML importer chunk | [path-expression-matcher 1.6.2](https://github.com/NaturalIntelligence/path-expression-matcher/tree/v1.6.2) | Ship the complete MIT notice. |
@@ -43,11 +43,11 @@ The following packages are not all direct declarations in `package.json`, but th
 
 ## Core build, server-runtime, and deployment chain
 
-These are direct development dependencies used by `vite.config.ts`, `postcss.config.mjs`, the Vinext scripts, or the Cloudflare deployment/runtime path. They are inventoried conservatively; the build-only qualification in the legend determines whether a particular release must ship each notice.
+These are build or server-runtime dependencies used by `vite.config.ts`, `postcss.config.mjs`, the Vinext scripts, or the Cloudflare deployment/runtime path. They are inventoried conservatively; the build-only qualification in the legend determines whether a particular release must ship each notice.
 
 | Package and installed version | Role in this repository | License evidence | Official upstream | Release compliance note |
 | --- | --- | --- | --- | --- |
-| `react-server-dom-webpack@19.2.8` | Vinext/React server runtime peer | `MIT`; installed `package.json` and `LICENSE` | [React 19.2.8 — `packages/react-server-dom-webpack`](https://github.com/facebook/react/tree/v19.2.8/packages/react-server-dom-webpack) | The package is present in the server build graph; ship its complete MIT notice. |
+| `react-server-dom-webpack@19.2.9` | Vinext/React server runtime peer | `MIT`; installed `package.json` and `LICENSE` | [React 19.2.9 — `packages/react-server-dom-webpack`](https://github.com/facebook/react/tree/v19.2.9/packages/react-server-dom-webpack) | The package is present in the server build graph; ship its complete MIT notice. |
 | `vinext@1.0.0-beta.8` | App framework CLI, build, and server runtime | `MIT`; installed `package.json` and `LICENSE` | [Vinext 1.0.0-beta.8](https://github.com/cloudflare/vinext/tree/vinext@1.0.0-beta.8) | The generated client/server framework chunks contain Vinext runtime code; ship the complete Vinext MIT notice. |
 | `vite@8.2.2` | Bundler used by `vite.config.ts` | `MIT`; installed `package.json` and `LICENSE.md` | [Vite 8.2.2 — `packages/vite`](https://github.com/vitejs/vite/tree/v8.2.2/packages/vite) | No Vite package implementation was identified as a release runtime; the generated Rolldown helpers are handled separately above. If Vite code/tooling is redistributed, preserve its **entire `LICENSE.md`**, including bundled-code notices. |
 | `@openai/sites-vite-plugin@0.1.0` | OpenAI Sites Vite plugin imported by `vite.config.ts` | `MIT`; installed `package.json` and `LICENSE` | [OpenAI Sites repository — `packages/sites-vite-plugin`](https://github.com/openai/sites/tree/main/packages/sites-vite-plugin) | If plugin/runtime code is included in a distributed artifact, ship its complete MIT notice. |

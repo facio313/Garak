@@ -4,9 +4,9 @@ import { access, readFile, readdir } from "node:fs/promises";
 import test from "node:test";
 
 const expectedPackageVersions = new Map([
-  ["react", "19.2.8"],
-  ["react-dom", "19.2.8"],
-  ["react-server-dom-webpack", "19.2.8"],
+  ["react", "19.2.9"],
+  ["react-dom", "19.2.9"],
+  ["react-server-dom-webpack", "19.2.9"],
   ["scheduler", "0.27.0"],
   ["vexflow", "5.0.0"],
   ["lucide-react", "1.33.0"],
@@ -276,5 +276,14 @@ test("engineering notice records the corrected font provenance and closed packag
   assert.doesNotMatch(notices, /VexFlow font notice packaging remains open/);
   for (const component of expectedPackageVersions.keys()) {
     assert.ok(notices.includes(`\`${component}@`), `${component} must be represented in the engineering inventory`);
+  }
+});
+
+test("production audit includes every React server runtime package", async () => {
+  const [manifest, lock] = await Promise.all([readJson("../package.json"), readJson("../package-lock.json")]);
+  for (const name of ["react", "react-dom", "react-server-dom-webpack"]) {
+    assert.equal(manifest.dependencies[name], expectedPackageVersions.get(name), `${name} must be covered by npm audit --omit=dev`);
+    assert.equal(manifest.devDependencies[name], undefined, `${name} ships in the runtime, not only the build tools`);
+    assert.notEqual(lock.packages[`node_modules/${name}`].dev, true, `${name} must not be omitted from the production audit graph`);
   }
 });

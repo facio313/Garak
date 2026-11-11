@@ -1,10 +1,10 @@
 {
   "verifiedAt": "2026-11-12",
   "entries": [
-    { "name": "react", "version": "19.2.8", "license": "MIT", "scope": "client/server", "noticePath": "./react-19.2.8-LICENSE.txt", "source": "https://github.com/facebook/react/tree/v19.2.8/packages/react" },
-    { "name": "react-dom", "version": "19.2.8", "license": "MIT", "scope": "client/server", "noticePath": "./react-dom-19.2.8-LICENSE.txt", "source": "https://github.com/facebook/react/tree/v19.2.8/packages/react-dom" },
-    { "name": "react-server-dom-webpack", "version": "19.2.8", "license": "MIT", "scope": "server", "noticePath": "./react-server-dom-webpack-19.2.8-LICENSE.txt", "source": "https://github.com/facebook/react/tree/v19.2.8/packages/react-server-dom-webpack" },
-    { "name": "scheduler", "version": "0.27.0", "license": "MIT", "scope": "client", "noticePath": "./scheduler-0.27.0-LICENSE.txt", "source": "https://github.com/facebook/react/tree/v19.2.8/packages/scheduler" },
+    { "name": "react", "version": "19.2.9", "license": "MIT", "scope": "client/server", "noticePath": "./react-19.2.9-LICENSE.txt", "source": "https://github.com/facebook/react/tree/v19.2.9/packages/react" },
+    { "name": "react-dom", "version": "19.2.9", "license": "MIT", "scope": "client/server", "noticePath": "./react-dom-19.2.9-LICENSE.txt", "source": "https://github.com/facebook/react/tree/v19.2.9/packages/react-dom" },
+    { "name": "react-server-dom-webpack", "version": "19.2.9", "license": "MIT", "scope": "server", "noticePath": "./react-server-dom-webpack-19.2.9-LICENSE.txt", "source": "https://github.com/facebook/react/tree/v19.2.9/packages/react-server-dom-webpack" },
+    { "name": "scheduler", "version": "0.27.0", "license": "MIT", "scope": "client", "noticePath": "./scheduler-0.27.0-LICENSE.txt", "source": "https://github.com/facebook/react/tree/v19.2.9/packages/scheduler" },
     { "name": "vexflow", "version": "5.0.0", "license": "MIT", "scope": "client/SSR", "noticePath": "./vexflow-5.0.0-LICENSE.txt", "source": "https://github.com/vexflow/vexflow/tree/5.0.0" },
     { "name": "lucide-react", "version": "1.33.0", "license": "ISC AND MIT", "scope": "client", "noticePath": "./lucide-react-1.33.0-LICENSE.txt", "source": "https://github.com/lucide-icons/lucide/tree/1.33.0/packages/lucide-react" },
     { "name": "fast-xml-parser", "version": "5.12.0", "license": "MIT", "scope": "client", "noticePath": "./fast-xml-parser-5.12.0-LICENSE.txt", "source": "https://github.com/NaturalIntelligence/fast-xml-parser/tree/v5.12.0" },
