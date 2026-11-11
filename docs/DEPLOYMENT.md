@@ -28,7 +28,7 @@ The repository intentionally supports two hosting targets.
 
 ## GitHub Actions flow
 
-`.github/workflows/ci.yml` runs for pull requests and the active development branches. It installs the lockfile with Node 22.23.2, validates the branch-bound authentication contract, lints, typechecks, builds, runs all tests, and validates the production Compose model.
+`.github/workflows/ci.yml` runs for pull requests and `main`/`dev`. Implementation and local app execution use `dev` after fetching and integrating the latest remote `main`. The canonical auth resolver enforces `main=sso`, `dev=local`, and rejects all other branches. It installs the lockfile with Node 22.23.2, validates the branch-bound authentication contract, lints, typechecks, builds, runs all tests, and validates the production Compose model.
 
 `.github/workflows/deploy.yml` is a `workflow_run` consumer of `Validate` on `main`. It refuses pull-request and fork results, checks out the exact validated SHA, and requires that SHA to remain the current `main` head. A native GitHub-hosted ARM64 runner then:
 

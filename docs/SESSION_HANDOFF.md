@@ -1,3 +1,13 @@
+## 2026-11-12 main/dev policy migration
+
+- User-authorized scope: preserve the latest production main and migrate implementation/local execution to dev; do not publish or deploy this policy change to main.
+- Current contract: main=sso, dev=local; other branches fail closed. CI validates both branches, and production publishing/deployment is main-only. Earlier dated tool-branch/dev-retirement notes below are historical, not current operating instructions.
+- Preservation: all remote refs were saved in a verified Git bundle outside the repository before changes. Original worktrees and dirty/untracked files were not overwritten; staging uses a separate dev checkout. Dependabot proposals remain archived, not merged.
+- Local verification: Canonical resolver matrix and main-local-run rejection passed. Typecheck, dev-mode build, workflow YAML parsing and diff checks passed. Domain/audio code is unchanged; configured CI owns the full application regression suite.
+- Validation and remote commit evidence are recorded outside Git under ~/.local/share/cks-main-dev-migration/2026-11-12/Garak/. Original-worktree checkout/retirement is coordinated separately after preservation checks.
+
+---
+
 # 다음 세션 이어하기
 
 마지막 갱신: 2026-10-15 KST

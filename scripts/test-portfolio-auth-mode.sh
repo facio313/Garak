@@ -14,24 +14,39 @@ assert_mode() {
   }
 }
 
+assert_rejected() {
+  label=$1
+  shift
+  if "$@" >/dev/null 2>&1; then
+    printf 'unexpected acceptance: %s\n' "$label" >&2
+    exit 1
+  fi
+}
+
 assert_mode main sso
-assert_mode dev sso
-assert_mode codex local
-assert_mode feature/deployment local
+assert_mode dev local
+assert_mode refs/heads/main sso
+assert_mode refs/heads/dev local
 
-github_mode=$(unset PORTFOLIO_BRANCH PORTFOLIO_AUTH_MODE; GITHUB_REF_NAME=main "$resolver" print)
-[ "$github_mode" = sso ]
+for branch in codex cursor anthropic feature/auth-contract; do
+  assert_rejected "unsupported branch $branch" env PORTFOLIO_BRANCH="$branch" PORTFOLIO_AUTH_MODE=local "$resolver" check
+done
+assert_rejected 'main/local mismatch' env PORTFOLIO_BRANCH=main PORTFOLIO_AUTH_MODE=local "$resolver" check
+assert_rejected 'dev/sso mismatch' env PORTFOLIO_BRANCH=dev PORTFOLIO_AUTH_MODE=sso "$resolver" check
+assert_rejected 'empty explicit branch' env PORTFOLIO_BRANCH= PORTFOLIO_AUTH_MODE=local "$resolver" check
+assert_rejected 'unsupported branch characters' env PORTFOLIO_BRANCH='dev invalid' PORTFOLIO_AUTH_MODE=local "$resolver" check
+assert_rejected 'empty exec command' env PORTFOLIO_BRANCH=dev PORTFOLIO_AUTH_MODE=local "$resolver" exec --
+assert_rejected 'unknown resolver command' env PORTFOLIO_BRANCH=dev PORTFOLIO_AUTH_MODE=local "$resolver" unknown
 
-if PORTFOLIO_BRANCH=main PORTFOLIO_AUTH_MODE=local "$resolver" check 2>/dev/null; then
-  printf '%s\n' 'mismatched explicit mode was accepted' >&2
-  exit 1
-fi
+github_mode=$(unset PORTFOLIO_BRANCH PORTFOLIO_AUTH_MODE; GITHUB_REF_NAME=dev "$resolver" print)
+[ "$github_mode" = local ]
+explicit_mode=$(unset PORTFOLIO_AUTH_MODE; PORTFOLIO_BRANCH=main GITHUB_REF_NAME=dev "$resolver" print)
+[ "$explicit_mode" = sso ]
 
-topic_contract=$(PORTFOLIO_BRANCH=topic PORTFOLIO_AUTH_MODE=local "$resolver" contract)
-[ "$topic_contract" = "$(printf 'topic\nlocal')" ]
-
-topic_environment=$(PORTFOLIO_BRANCH=topic PORTFOLIO_AUTH_MODE=local "$resolver" exec -- env)
-printf '%s\n' "$topic_environment" | grep -Fqx 'PORTFOLIO_BRANCH=topic'
-printf '%s\n' "$topic_environment" | grep -Fqx 'PORTFOLIO_AUTH_MODE=local'
+dev_contract=$(PORTFOLIO_BRANCH=dev PORTFOLIO_AUTH_MODE=local "$resolver" contract)
+[ "$dev_contract" = "$(printf 'dev\nlocal')" ]
+dev_environment=$(PORTFOLIO_BRANCH=dev PORTFOLIO_AUTH_MODE=local "$resolver" exec -- env)
+printf '%s\n' "$dev_environment" | grep -Fqx 'PORTFOLIO_BRANCH=dev'
+printf '%s\n' "$dev_environment" | grep -Fqx 'PORTFOLIO_AUTH_MODE=local'
 
 printf '%s\n' 'portfolio auth mode contract: ok'
