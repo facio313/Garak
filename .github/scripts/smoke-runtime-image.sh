@@ -89,14 +89,14 @@ licenses_html=$(curl --fail --silent --show-error \
   "http://127.0.0.1:${host_port}/garak/licenses")
 grep -Fq '<title>Open-source licenses — Garak Studio</title>' <<<"$licenses_html"
 grep -Fq 'href="/garak/licenses/manifest.json"' <<<"$licenses_html"
-grep -Fq 'href="/garak/licenses/react-19.2.8-LICENSE.txt"' <<<"$licenses_html"
+grep -Fq 'href="/garak/licenses/react-19.2.9-LICENSE.txt"' <<<"$licenses_html"
 # Read the entire response before matching: grep -q can close a live curl
 # pipe early, making a valid response fail under pipefail (curl exit 23).
 licenses_manifest=$(curl --fail --silent --show-error \
   "http://127.0.0.1:${host_port}/garak/licenses/manifest.json")
-grep -Fq '"noticePath": "./react-19.2.8-LICENSE.txt"' <<<"$licenses_manifest"
+grep -Fq '"noticePath": "./react-19.2.9-LICENSE.txt"' <<<"$licenses_manifest"
 react_license=$(curl --fail --silent --show-error \
-  "http://127.0.0.1:${host_port}/garak/licenses/react-19.2.8-LICENSE.txt")
+  "http://127.0.0.1:${host_port}/garak/licenses/react-19.2.9-LICENSE.txt")
 grep -Fq 'MIT License' <<<"$react_license"
 
 outside_status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
