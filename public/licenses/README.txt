@@ -1,22 +1,22 @@
 Garak Studio third-party license bundle
-Verified for the 2026-08-30 release candidate.
+Verified for the 2026-11-12 release.
 
 This directory is shipped with the web release so its complete license texts
 remain available without relying on an external service. The app's
 /licenses page links to every file.
 
 Runtime/browser and server notices:
-- React 19.2.8
-- React DOM 19.2.8
-- React Server DOM Webpack 19.2.8
+- React 19.2.9
+- React DOM 19.2.9
+- React Server DOM Webpack 19.2.9
 - Scheduler 0.27.0
 - VexFlow 5.0.0
 - Lucide React 1.33.0 (the complete installed file includes its Feather notice)
-- fast-xml-parser 5.11.0
-- @nodable/entities 3.0.0
-- is-unsafe 2.0.2
+- fast-xml-parser 5.12.0
+- @nodable/entities 3.1.0
+- is-unsafe 2.0.3
 - path-expression-matcher 1.6.2
-- strnum 2.4.2
+- strnum 2.5.1
 - anynum 1.0.1
 - xml-naming 0.3.0
 - Rolldown 1.2.6 generated runtime (including its Rollup/esbuild derived-code notices)

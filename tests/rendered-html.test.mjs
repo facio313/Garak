@@ -294,7 +294,7 @@ test("ships a complete, locally readable, version-matched license inventory", as
   assert.match(html, />Open-source licenses</);
   assert.match(html, />19(?:<!-- -->)? shipped components and font payloads</);
   assert.match(html, /href="\/licenses\/manifest\.json"/);
-  assert.match(html, /href="\/licenses\/react-19\.2\.8-LICENSE\.txt"/);
+  assert.match(html, /href="\/licenses\/react-19\.2\.9-LICENSE\.txt"/);
   assert.match(html, /Academico Regular/);
   assert.match(html, /Academico Bold/);
   assert.match(html, /Bravura/);
