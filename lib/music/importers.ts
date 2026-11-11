@@ -126,7 +126,7 @@ function children(node: XmlNode | undefined, name: string): XmlNode[] {
 }
 
 function firstChild(node: XmlNode | undefined, name: string): XmlNode | undefined {
-  return children(node, name)[0];
+  return content(node).find((child) => Object.prototype.hasOwnProperty.call(child, name));
 }
 
 function childEntries(node: XmlNode | undefined, name: string): XmlNode[] {
@@ -611,7 +611,9 @@ export function importMusicXML(xml: string): MusicXMLImportResult {
   const validation = XMLValidator.validate(xml);
   if (validation !== true) throw new Error(`The MusicXML file is not well-formed: ${validation.err.msg}`);
 
-  const parsed = new XMLParser({ ignoreAttributes: false, preserveOrder: true, trimValues: true }).parse(xml) as XmlNode[];
+  // MusicXML text (including names and voice IDs) is not implicitly numeric.
+  // Numeric musical fields are converted and validated explicitly below.
+  const parsed = new XMLParser({ ignoreAttributes: false, preserveOrder: true, trimValues: true, parseTagValue: false }).parse(xml) as XmlNode[];
   const root = parsed.find((node) => Object.prototype.hasOwnProperty.call(node, "score-partwise"));
   if (!root) throw new Error("Garak currently imports MusicXML score-partwise documents. Convert timewise scores before opening them.");
 

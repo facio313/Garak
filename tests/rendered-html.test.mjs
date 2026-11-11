@@ -650,7 +650,8 @@ test("ships product metadata and removes the disposable starter", async () => {
   assert.ok(renderer.includes("noteEndX - noteStartX - Stave.defaultPadding"), "voice justification must reserve VexFlow's canonical right padding");
   assert.ok(playbackPosition.includes("targetTick < measureStartTick + capacity || isLast"), "exact barlines must advance to the next measure while the final measure clamps");
   assert.ok(playbackPosition.includes("TICKS_PER_WHOLE / measure.time.denominator"), "transport beats must follow each measure's denominator");
-  assert.ok(renderer.includes("locatePlaybackPosition(score, playbackSeconds)"), "the engraved cursor must consume the shared semantic playback mapper");
+  assert.ok(renderer.includes("useMemo(() => createPlaybackPositionLocator(score), [score])"), "the engraved cursor must prepare the shared playback index only when the score changes");
+  assert.ok(renderer.includes("locatePlayback(playbackSeconds)"), "the engraved cursor must query the prepared shared playback index");
   assert.ok(renderer.includes('className="notation-playhead"'), "playback must render a measure-local notation cursor");
   assert.ok(styles.includes("margin-left: calc(-1px * var(--engraving-ui-scale,1))"), "the two-screen-pixel notation cursors must be centered on their VexFlow anchor");
   assert.ok(renderer.includes("xForMeasureTick(playbackLayout, playbackPosition.tickInMeasure"), "the notation cursor must interpolate from semantic ticks through engraved anchors");

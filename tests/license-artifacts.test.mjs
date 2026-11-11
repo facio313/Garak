@@ -10,11 +10,11 @@ const expectedPackageVersions = new Map([
   ["scheduler", "0.27.0"],
   ["vexflow", "5.0.0"],
   ["lucide-react", "1.33.0"],
-  ["fast-xml-parser", "5.11.0"],
-  ["@nodable/entities", "3.0.0"],
-  ["is-unsafe", "2.0.2"],
+  ["fast-xml-parser", "5.12.0"],
+  ["@nodable/entities", "3.1.0"],
+  ["is-unsafe", "2.0.3"],
   ["path-expression-matcher", "1.6.2"],
-  ["strnum", "2.4.2"],
+  ["strnum", "2.5.1"],
   ["anynum", "1.0.1"],
   ["xml-naming", "0.3.0"],
   ["rolldown", "1.2.6"],
@@ -24,7 +24,7 @@ const expectedPackageVersions = new Map([
 
 const regressionProneSources = new Map([
   ["vexflow", "https://github.com/vexflow/vexflow/tree/5.0.0"],
-  ["@nodable/entities", "https://github.com/nodable/val-parsers/tree/d2070d76a8ba07e6c7fa142caeb51ffd756e47eb/Entity"],
+  ["@nodable/entities", "https://github.com/nodable/val-parsers/tree/ac48e7ea591da372be023a481875c747535812b3/Entity"],
   ["anynum", "https://github.com/NaturalIntelligence/anynum/tree/996c4711809427963104d717c1bd77383c8f0124"],
   ["xml-naming", "https://github.com/NaturalIntelligence/xml-naming/tree/f732ff38aa3e343ef64d190f0c96f370cb357969"],
   ["rolldown", "https://github.com/rolldown/rolldown/tree/v1.2.6"],
@@ -100,7 +100,7 @@ test("license manifest is version-pinned and every local resource is copied into
     readJson("../package-lock.json"),
   ]);
 
-  assert.equal(manifest.verifiedAt, "2026-08-30");
+  assert.equal(manifest.verifiedAt, "2026-11-12");
   assert.equal(manifest.entries.length, expectedPackageVersions.size + 3);
 
   const packageEntries = manifest.entries.filter((entry) => !entry.provenancePath);
@@ -160,7 +160,7 @@ test("package license copies match installed artifacts and pinned upstream excep
     );
   }
 
-  const entities = await readFile(new URL("../public/licenses/entities-3.0.0-LICENSE.txt", import.meta.url));
+  const entities = await readFile(new URL("../public/licenses/entities-3.1.0-LICENSE.txt", import.meta.url));
   assert.equal(sha256(entities), "750cb3fb6362804957ef52caaf9b5c824015be44d494637330d7cd8834d31d40");
 
   const rolldownDerived = await readFile(
@@ -270,7 +270,7 @@ test("Rolldown generated client/server helpers retain both required notice files
 
 test("engineering notice records the corrected font provenance and closed packaging gate", async () => {
   const notices = await readFile(new URL("../THIRD_PARTY_NOTICES.md", import.meta.url), "utf8");
-  assert.match(notices, /Last locally verified: 2026-08-30 \(Asia\/Seoul\)/);
+  assert.match(notices, /Last inventory update: 2026-11-12 \(Asia\/Seoul\)/);
   assert.match(notices, /301087ca0b0d30b65d81bc3e718ff64b613e2a9a/);
   assert.doesNotMatch(notices, /632e925353aab2ac0a81c97a4662d315a82b56f4/);
   assert.doesNotMatch(notices, /VexFlow font notice packaging remains open/);

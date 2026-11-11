@@ -749,3 +749,39 @@ test("MusicXML import enforces the native timeline ceiling before event material
   assert.equal(importedTimelineTicks, SCORE_VALIDATION_LIMITS.timelineTicks);
   assert.deepEqual(validateScore(imported.score), [], "the inclusive native timeline boundary remains importable and valid");
 });
+
+test("MusicXML preserves numeric-looking and boolean metadata as text", () => {
+  for (const title of ["00123", "1e3", "0x10", "true", "false"]) {
+    const xml = CLARINET_FIXTURE
+      .replace("Import fixture", title)
+      .replace("Garak QA", "00123")
+      .replace("B♭ Clarinet", "0x10")
+      .replace("B♭ Cl.", "1e3");
+    const { score } = importMusicXML(xml);
+    assert.equal(score.metadata.title, title);
+    assert.equal(score.metadata.composer, "00123");
+    assert.equal(score.parts[0].name, "0x10");
+    assert.equal(score.parts[0].shortName, "1e3");
+    assert.deepEqual(validateScore(score), []);
+    assert.equal(importMusicXML(scoreToMusicXML(score)).score.metadata.title, title);
+  }
+});
+
+test("MusicXML keeps textual voice IDs distinct when selecting primary voice 1", () => {
+  const xml = `<score-partwise version="4.0">
+    <part-list><score-part id="P1"><part-name>Voice IDs</part-name></score-part></part-list>
+    <part id="P1"><measure number="1">
+      <attributes><divisions>480</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>480</duration><voice>01</voice><type>quarter</type></note>
+      <backup><duration>480</duration></backup>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>480</duration><voice>1</voice><type>quarter</type></note>
+    </measure></part>
+  </score-partwise>`;
+  const { score, warnings } = importMusicXML(xml);
+  const events = getPrimaryVoice(score.parts[0], score.measureOrder[0]).events;
+  assert.equal(events.length, 1);
+  assert.equal(events[0].kind, "note");
+  if (events[0].kind === "note") assert.equal(events[0].notes[0].pitch.step, "E");
+  assert.match(warnings.join("\n"), /01/);
+  assert.deepEqual(validateScore(score), []);
+});

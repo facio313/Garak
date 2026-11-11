@@ -13,7 +13,7 @@ import { DURATION_LABELS, TICKS_PER_QUARTER, durationTicks, measureCapacity, pit
 import { diatonicPitchIndex, finishesScoreNoteDrag, finishesScorePointerTap, hasSystemShortcutModifier, pitchFromStaffPointer, startScoreNoteDrag, startScorePointerTap, trackScoreNoteDrag, trackScorePointerTap } from "../lib/music/note-input";
 import type { NoteEntryMethod, ScoreNoteDrag, ScorePointerTap } from "../lib/music/note-input";
 import { timedHairpins } from "../lib/music/hairpins";
-import { locatePlaybackPosition } from "../lib/music/playback-position";
+import { createPlaybackPositionLocator } from "../lib/music/playback-position";
 
 export interface ScoreEventSelection {
   partId: string;
@@ -228,6 +228,7 @@ const LABEL_WIDTH = 88;
 const RIGHT_MARGIN = 14;
 const TOP_PADDING = 32;
 const FOLLOW_MARGIN = 12;
+const EMPTY_EVENT_IDS: readonly string[] = [];
 const EMPTY_MEASURE_LAYOUTS: readonly MeasureScreenLayout[] = [];
 const EMPTY_EVENT_LAYOUTS: readonly EventScreenLayout[] = [];
 const EMPTY_NOTEHEAD_LAYOUTS: readonly NoteheadScreenLayout[] = [];
@@ -439,12 +440,13 @@ function buildSystems(score: ScoreDocument, rows: readonly RenderRow[], renderWi
   let current: { measureIds: string[]; minimums: number[] } = { measureIds: [], minimums: [] };
 
   for (const [absoluteIndex, measureId] of score.measureOrder.entries()) {
-    let minimum = measureMusicWidth(rows, measureId) + modifierWidth(score, rows, measureId, absoluteIndex, current.measureIds.length === 0);
+    const musicWidth = measureMusicWidth(rows, measureId);
+    let minimum = musicWidth + modifierWidth(score, rows, measureId, absoluteIndex, current.measureIds.length === 0);
     const used = current.minimums.reduce((sum, value) => sum + value, 0);
     if (current.measureIds.length && used + minimum > usableWidth) {
       systems.push(current);
       current = { measureIds: [], minimums: [] };
-      minimum = measureMusicWidth(rows, measureId) + modifierWidth(score, rows, measureId, absoluteIndex, true);
+      minimum = musicWidth + modifierWidth(score, rows, measureId, absoluteIndex, true);
     }
     current.measureIds.push(measureId);
     current.minimums.push(Math.max(96, minimum));
@@ -477,7 +479,7 @@ export function ScoreRenderer({
   entryTick = 0,
   selectedEventId = null,
   selectedNoteId = null,
-  selectedEventIds = [],
+  selectedEventIds = EMPTY_EVENT_IDS,
   rangeSelectionMode = false,
   rangeDestinationMode = null,
   onRangeEventSelect,
@@ -549,7 +551,7 @@ export function ScoreRenderer({
   const noteheadLayouts = layoutsAreCurrent ? engravingState.noteheadLayouts : EMPTY_NOTEHEAD_LAYOUTS;
   const staffHitLayouts = layoutsAreCurrent ? engravingState.staffHitLayouts : EMPTY_STAFF_HIT_LAYOUTS;
   const renderError = layoutsAreCurrent ? engravingState.error : "";
-  const rangeEventIds = new Set(selectedEventIds);
+  const rangeEventIds = useMemo(() => new Set(selectedEventIds), [selectedEventIds]);
   const rangeInteraction = rangeSelectionMode || selectedEventIds.length > 0 || Boolean(rangeDestinationMode);
   const pointerInteraction = `${Boolean(onPlaybackSeek)}:${rangeSelectionMode}:${selectedEventIds.length > 0}:${rangeDestinationMode ?? ""}`;
   const selectedEventDetails = useMemo(
@@ -1454,9 +1456,10 @@ export function ScoreRenderer({
       ? rows.filter((row) => row.part.id === selectedPartId)
       : [];
   const keyboardRow = selectedStaffRow ?? rows.find((row) => row.part.id === selectedPartId) ?? rows[0];
+  const locatePlayback = useMemo(() => createPlaybackPositionLocator(score), [score]);
   const playbackPosition = useMemo(
-    () => playbackSeconds === null ? null : locatePlaybackPosition(score, playbackSeconds),
-    [playbackSeconds, score],
+    () => playbackSeconds === null ? null : locatePlayback(playbackSeconds),
+    [playbackSeconds, locatePlayback],
   );
   const playbackLayout = playbackPosition
     ? measureLayouts.find((layout) => layout.measureId === playbackPosition.measureId)
@@ -1475,7 +1478,7 @@ export function ScoreRenderer({
   const entryCursorX = entryCursor?.x;
   const entryCursorTop = entryCursor?.top;
   const selectedEventLayout = selectedEventId ? eventLayouts.find((layout) => layout.eventId === selectedEventId) : undefined;
-  const rangeRectangles = [...eventLayouts.filter((layout) => rangeEventIds.has(layout.eventId)).reduce((groups, layout) => {
+  const rangeRectangles = useMemo(() => [...eventLayouts.filter((layout) => rangeEventIds.has(layout.eventId)).reduce((groups, layout) => {
     const key = `${layout.systemIndex}:${layout.partId}:${layout.staffId}`;
     const staff = staffHitLayouts.find((candidate) => candidate.systemIndex === layout.systemIndex && candidate.staffId === layout.staffId);
     const top = Math.min(layout.y, (staff?.topLineY ?? layout.y) - 10);
@@ -1487,7 +1490,7 @@ export function ScoreRenderer({
       height: Math.max(previous.y + previous.height, bottom) - Math.min(previous.y, top),
     } : { x: layout.x, y: top, width: layout.width, height: bottom - top });
     return groups;
-  }, new Map<string, ScreenRect>()).entries()];
+  }, new Map<string, ScreenRect>()).entries()], [eventLayouts, rangeEventIds, staffHitLayouts]);
   const visibleRangeDestination = rangeDestinationMode && rangeDestinationPreview?.source === engravingSource ? rangeDestinationPreview : null;
   const pointerPreviewIsCurrent = Boolean(
     pointerNotePreview

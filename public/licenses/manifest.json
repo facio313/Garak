@@ -1,5 +1,5 @@
 {
-  "verifiedAt": "2026-08-30",
+  "verifiedAt": "2026-11-12",
   "entries": [
     { "name": "react", "version": "19.2.8", "license": "MIT", "scope": "client/server", "noticePath": "./react-19.2.8-LICENSE.txt", "source": "https://github.com/facebook/react/tree/v19.2.8/packages/react" },
     { "name": "react-dom", "version": "19.2.8", "license": "MIT", "scope": "client/server", "noticePath": "./react-dom-19.2.8-LICENSE.txt", "source": "https://github.com/facebook/react/tree/v19.2.8/packages/react-dom" },
@@ -7,11 +7,11 @@
     { "name": "scheduler", "version": "0.27.0", "license": "MIT", "scope": "client", "noticePath": "./scheduler-0.27.0-LICENSE.txt", "source": "https://github.com/facebook/react/tree/v19.2.8/packages/scheduler" },
     { "name": "vexflow", "version": "5.0.0", "license": "MIT", "scope": "client/SSR", "noticePath": "./vexflow-5.0.0-LICENSE.txt", "source": "https://github.com/vexflow/vexflow/tree/5.0.0" },
     { "name": "lucide-react", "version": "1.33.0", "license": "ISC AND MIT", "scope": "client", "noticePath": "./lucide-react-1.33.0-LICENSE.txt", "source": "https://github.com/lucide-icons/lucide/tree/1.33.0/packages/lucide-react" },
-    { "name": "fast-xml-parser", "version": "5.11.0", "license": "MIT", "scope": "client", "noticePath": "./fast-xml-parser-5.11.0-LICENSE.txt", "source": "https://github.com/NaturalIntelligence/fast-xml-parser/tree/v5.11.0" },
-    { "name": "@nodable/entities", "version": "3.0.0", "license": "MIT", "scope": "client XML import", "noticePath": "./entities-3.0.0-LICENSE.txt", "source": "https://github.com/nodable/val-parsers/tree/d2070d76a8ba07e6c7fa142caeb51ffd756e47eb/Entity" },
-    { "name": "is-unsafe", "version": "2.0.2", "license": "MIT", "scope": "client XML import", "noticePath": "./is-unsafe-2.0.2-LICENSE.txt", "source": "https://github.com/NaturalIntelligence/is-unsafe/tree/v2.0.2" },
+    { "name": "fast-xml-parser", "version": "5.12.0", "license": "MIT", "scope": "client", "noticePath": "./fast-xml-parser-5.12.0-LICENSE.txt", "source": "https://github.com/NaturalIntelligence/fast-xml-parser/tree/v5.12.0" },
+    { "name": "@nodable/entities", "version": "3.1.0", "license": "MIT", "scope": "client XML import", "noticePath": "./entities-3.1.0-LICENSE.txt", "source": "https://github.com/nodable/val-parsers/tree/ac48e7ea591da372be023a481875c747535812b3/Entity" },
+    { "name": "is-unsafe", "version": "2.0.3", "license": "MIT", "scope": "client XML import", "noticePath": "./is-unsafe-2.0.3-LICENSE.txt", "source": "https://github.com/NaturalIntelligence/is-unsafe/tree/v2.0.3" },
     { "name": "path-expression-matcher", "version": "1.6.2", "license": "MIT", "scope": "client XML import", "noticePath": "./path-expression-matcher-1.6.2-LICENSE.txt", "source": "https://github.com/NaturalIntelligence/path-expression-matcher/tree/v1.6.2" },
-    { "name": "strnum", "version": "2.4.2", "license": "MIT", "scope": "client XML import", "noticePath": "./strnum-2.4.2-LICENSE.txt", "source": "https://github.com/NaturalIntelligence/strnum/tree/v2.4.2" },
+    { "name": "strnum", "version": "2.5.1", "license": "MIT", "scope": "client XML import", "noticePath": "./strnum-2.5.1-LICENSE.txt", "source": "https://github.com/NaturalIntelligence/strnum/tree/v2.5.1" },
     { "name": "anynum", "version": "1.0.1", "license": "MIT", "scope": "client XML import", "noticePath": "./anynum-1.0.1-LICENSE.txt", "source": "https://github.com/NaturalIntelligence/anynum/tree/996c4711809427963104d717c1bd77383c8f0124" },
     { "name": "xml-naming", "version": "0.3.0", "license": "MIT", "scope": "client XML import", "noticePath": "./xml-naming-0.3.0-LICENSE.txt", "source": "https://github.com/NaturalIntelligence/xml-naming/tree/f732ff38aa3e343ef64d190f0c96f370cb357969" },
     { "name": "rolldown", "version": "1.2.6", "license": "MIT", "scope": "generated client/server runtime", "noticePath": "./rolldown-1.2.6-LICENSE.txt", "additionalNoticePath": "./rolldown-1.2.6-THIRD-PARTY-LICENSE.txt", "additionalNoticeLabel": "Bundled-code notices", "source": "https://github.com/rolldown/rolldown/tree/v1.2.6" },

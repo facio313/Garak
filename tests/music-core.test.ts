@@ -16,7 +16,7 @@ import type { MusicEvent, Pitch, ScoreDocument, ScoreNote } from "../lib/music/m
 import { MAX_NATIVE_SCORE_BYTES, serializeNativeScore } from "../lib/music/native-format";
 import { eventTimeline, timedHairpins } from "../lib/music/hairpins";
 import { schedulePlaybackGain } from "../lib/music/playback-gain";
-import { locatePlaybackPosition } from "../lib/music/playback-position";
+import { createPlaybackPositionLocator, locatePlaybackPosition } from "../lib/music/playback-position";
 import { addChordTone, addChordToneToEvent, addInstrument, appendEvent, appendMeasure, changeEventRangeDuration, clearEventRange, clearEventToRest, copyEventRangeToPosition, createScore, editEventNotation, findEventTargetMeasureId, getEventMoveGroup, getEventRange, getTiedNoteIds, makeEvent, moveEventRangeToPosition, moveEventToPosition, removeChordToneFromEvent, removeEvent, removeInstrument, removeLastChordTone, removeLastEvent, removeLastMeasure, setEventArticulation, setEventDynamic, setEventRangeExpression, setEventRangeHairpin, setKeyFromMeasure, setLastEventDynamic, setLastNoteArticulation, setMeasureKey, setNoteTie, setScoreKey, setTimeFromMeasure, toggleTieLastTwo, transposeEventRange } from "../lib/music/score";
 
 test("new Solo scores use the chosen instrument's staff layout and transposition and round-trip after setup", () => {
@@ -4328,4 +4328,33 @@ test("failed practice preference writes cannot leave an obsolete undo available 
   const failing={...storage,setItem(){throw new Error("storage full");}};
   assert.throws(()=>persistPracticeSettings(failing,{...PRACTICE_DEFAULTS,rate:.5},null),/storage full/);
   assert.equal(readPracticeResetUndo(storage),null);
+});
+
+
+test("indexed playback matches the timeline across boundaries, backward seeks, loops and score edits", () => {
+  const score = createScore("solo", { seedDemo: false });
+  score.tempo = 120;
+  const meters = [{ numerator: 4, denominator: 4 }, { numerator: 6, denominator: 8 }, { numerator: 3, denominator: 4 }, { numerator: 5, denominator: 8 }];
+  score.measureOrder.forEach((id, index) => { score.measures[id].time = meters[index % meters.length]; });
+  const locate = createPlaybackPositionLocator(score);
+  const positions = [0, 2 - 1e-9, 2, 2 + 1e-9, 3.5, 5, 6.25, 999, 0, 5, 2.25, -1, NaN, Infinity, Number.MAX_VALUE];
+  for (const seconds of positions) assert.deepEqual(locate(seconds), locatePlaybackPosition(score, seconds));
+  const edited = structuredClone(score);
+  edited.tempo = 60;
+  edited.measures[edited.measureOrder[0]].time = { numerator: 2, denominator: 4 };
+  edited.measureOrder.pop();
+  const locateEdited = createPlaybackPositionLocator(edited);
+  for (const seconds of positions) assert.deepEqual(locateEdited(seconds), locatePlaybackPosition(edited, seconds));
+  assert.deepEqual(locate(5), locatePlaybackPosition(score, 5), "another score must not invalidate the previous snapshot");
+  assert.equal(createPlaybackPositionLocator({ ...score, measureOrder: [] })(0), null);
+});
+
+test("indexed playback reads measure metadata once, not on every animation frame", () => {
+  const score = createScore("solo", { seedDemo: false });
+  let reads = 0;
+  const measures = new Proxy(score.measures, { get(target, key, receiver) { reads++; return Reflect.get(target, key, receiver); } });
+  const locate = createPlaybackPositionLocator({ ...score, measures });
+  assert.equal(reads, score.measureOrder.length);
+  for (let frame = 0; frame < 600; frame++) assert.ok(locate(frame / 60));
+  assert.equal(reads, score.measureOrder.length, "600 frames must reuse the precomputed measure boundaries");
 });

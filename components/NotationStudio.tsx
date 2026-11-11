@@ -69,7 +69,7 @@ import {
   shiftChromaticPitch,
 } from "../lib/music/note-input";
 import type { DiatonicPitch, NoteEntryMethod } from "../lib/music/note-input";
-import { locatePlaybackPosition } from "../lib/music/playback-position";
+import { createPlaybackPositionLocator, locatePlaybackPosition } from "../lib/music/playback-position";
 import { createPlaybackQueue } from "../lib/music/playback-transport";
 import { countInForPosition, metronomeNotes } from "../lib/music/metronome";
 import { createLivePlayback } from "../lib/music/live-playback";
@@ -296,9 +296,9 @@ export function NotationStudio() {
   const [score, setScore] = useState<ScoreDocument>(() => createScore("chamber"));
   const [past, setPast] = useState<HistoryEntry[]>([]);
   const [future, setFuture] = useState<HistoryEntry[]>([]);
-  const [selectedPartId, setSelectedPartId] = useState(() => createScore("chamber").parts[0].id);
-  const [selectedStaffId, setSelectedStaffId] = useState(() => createScore("chamber").parts[0].staves[0].id);
-  const [changeMeasureId, setChangeMeasureId] = useState(() => createScore("chamber").measureOrder[0]);
+  const [selectedPartId, setSelectedPartId] = useState(() => score.parts[0].id);
+  const [selectedStaffId, setSelectedStaffId] = useState(() => score.parts[0].staves[0].id);
+  const [changeMeasureId, setChangeMeasureId] = useState(() => score.measureOrder[0]);
   const [viewMode, setViewMode] = useState<"score" | "part">("score");
   const [duration, setDuration] = useState<DurationBase>(4);
   const [dotCount, setDotCount] = useState<DurationValue["dots"]>(0);
@@ -768,7 +768,8 @@ export function NotationStudio() {
     ? (selectedChordNote?.eventId === selectedEvent.id ? selectedEvent.notes.find((note) => note.id === selectedChordNote.noteId) : undefined) ?? selectedEvent.notes[0]
     : null;
   const selectedPitch = selectedTone?.pitch ?? null;
-  const selectedRhythm = selectedEventTarget && selectedEvent ? eventRhythm(score, selectedEventTarget.partId, selectedEventTarget.staffId, selectedEventTarget.measureId, selectedEventTarget.eventId) : null;
+  const hasSelectedEvent = Boolean(selectedEvent);
+  const selectedRhythm = useMemo(() => selectedEventTarget && hasSelectedEvent ? eventRhythm(score, selectedEventTarget.partId, selectedEventTarget.staffId, selectedEventTarget.measureId, selectedEventTarget.eventId) : null, [score, hasSelectedEvent, selectedEventTarget]);
   const editingDuration = selectedRhythm?.duration ?? selectedEvent?.duration;
   const selectedIsChord = selectedEvent?.kind === "note" && selectedEvent.notes.length > 1;
   const currentEventEditError = eventEditError?.score === score && eventEditError.eventId === selectedEvent?.id ? eventEditError : null;
@@ -832,7 +833,8 @@ export function NotationStudio() {
         ?? voiceTicks(getPrimaryVoice(selectedPart, previewMeasureId, selectedStaffIndex))
       : voiceTicks(getPrimaryVoice(selectedPart, previewMeasureId, selectedStaffIndex))
     : 0;
-  const playbackPosition = playbackSeconds === null ? null : locatePlaybackPosition(score, playbackSeconds);
+  const locatePlayback = useMemo(() => createPlaybackPositionLocator(score), [score]);
+  const playbackPosition = playbackSeconds === null ? null : locatePlayback(playbackSeconds);
   const transportBeat = countInProgress?.beat ?? playbackPosition?.beat;
   const transportBeats = countInProgress?.beats ?? (playbackPosition ? score.measures[playbackPosition.measureId].time.numerator : 0);
   const liveEngravingPlan = useMemo(
